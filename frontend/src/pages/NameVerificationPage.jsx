@@ -92,11 +92,6 @@ export default function NameVerificationPage() {
     }
   };
 
-  const handleSelectExisting = (member) => {
-    setSelectedMember(member);
-    navigate("/dashboard");
-  };
-
   return (
     <Box
       sx={{
@@ -174,49 +169,6 @@ export default function NameVerificationPage() {
           Signed in as: <strong>{user?.email}</strong>
         </Typography>
 
-        {/* Existing registered member chips under this email */}
-        {familyMembers.length > 0 && (
-          <Box
-            sx={{
-              mb: 3,
-              p: 2.5,
-              borderRadius: 3.5,
-              backgroundColor: "rgba(253, 248, 237, 0.9)",
-              border: "1.5px dashed rgba(212, 175, 55, 0.6)",
-              textAlign: "center",
-            }}
-          >
-            <Typography variant="caption" sx={{ color: "#92400E", fontWeight: 800, display: "block", mb: 1.5, letterSpacing: 0.8 }}>
-              YOUR REGISTERED FAMILY MEMBERS:
-            </Typography>
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.2, justifyContent: "center" }}>
-              {familyMembers.map((m) => (
-                <Chip
-                  key={m.id}
-                  label={`🎅 ${m.officialName}`}
-                  onClick={() => handleSelectExisting(m)}
-                  clickable
-                  sx={{
-                    fontWeight: 800,
-                    fontSize: "0.95rem",
-                    py: 2.2,
-                    px: 1.2,
-                    backgroundColor: "rgba(255, 255, 255, 0.98)",
-                    color: "#78350F",
-                    border: "2px solid #D4AF37",
-                    boxShadow: "0 3px 10px rgba(212, 175, 55, 0.25)",
-                    "&:hover": {
-                      backgroundColor: "#FDE68A",
-                      borderColor: "#B45309",
-                      transform: "scale(1.03)",
-                    },
-                  }}
-                />
-              ))}
-            </Box>
-          </Box>
-        )}
-
         {error && (
           <Alert severity="error" sx={{ mb: 3, borderRadius: 2, textAlign: "left" }}>
             {error}
@@ -224,11 +176,9 @@ export default function NameVerificationPage() {
         )}
 
         <form onSubmit={handleGoToDashboard}>
-          <Box sx={{ textAlign: "left", mb: 1 }}>
+          <Box sx={{ textAlign: "left", mb: 1.5 }}>
             <Typography variant="subtitle2" sx={{ color: "#78350F", fontWeight: 800 }}>
-              {familyMembers.length > 0
-                ? "Or Select Another Family Member to Link:"
-                : "Select Your Name from the Official 45 Roster:"}
+              Select Your Name from the Official 45 Roster:
             </Typography>
           </Box>
 
