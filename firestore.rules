@@ -28,8 +28,15 @@ service cloud.firestore {
         )
       );
 
-      // Only Admin can create or delete participants (e.g. seeding initial 45 roster)
-      allow create: if isAdmin();
+      // Allow Admin to create or delete participants.
+      // Also allow authenticated family members to auto-seed missing official PENDING slots
+      // (ensures participant slots exist even before Admin visits the console).
+      allow create: if isAdmin() || (
+        request.auth != null &&
+        request.resource.data.status == 'PENDING' &&
+        request.resource.data.id == participantId &&
+        request.resource.data.registeredByEmail == null
+      );
       allow delete: if isAdmin();
 
       // Updates:

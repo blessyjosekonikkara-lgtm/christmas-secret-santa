@@ -196,12 +196,10 @@ export const secretSantaService = {
     return { user: simulatedUser };
   },
 
-  // 2. Safe Central Seeding (Admin Only, Non-Destructive Merge)
+  // 2. Safe Central Seeding (Ensures all 45 slots exist as PENDING)
   async initializeParticipantsIfEmpty(user) {
     if (!isLiveFirebaseConfigured || !db) return { initialized: false, count: 0 };
-    if (!user || user.email?.toLowerCase() !== ADMIN_EMAIL.toLowerCase()) {
-      return { initialized: false, count: 0 };
-    }
+    if (!user || !user.email) return { initialized: false, count: 0 };
 
     try {
       const snap = await getDocs(collection(db, "participants"));
@@ -257,7 +255,19 @@ export const secretSantaService = {
         const docRef = doc(db, "participants", docId);
         const snap = await getDoc(docRef);
 
-        if (snap.exists()) {
+        if (!snap.exists()) {
+          // If official slot doesn't exist yet, seed as PENDING first
+          await setDoc(docRef, {
+            id: docId,
+            officialName: officialMatch,
+            normalizedName: norm,
+            status: "PENDING",
+            registeredByEmail: null,
+            registeredByUid: null,
+            registeredAt: null,
+            hasRevealed: false,
+          });
+        } else {
           const cur = snap.data();
           if (cur.status === "REGISTERED") {
             if (cur.registeredByEmail?.toLowerCase() === userEmail) {
@@ -274,7 +284,7 @@ export const secretSantaService = {
           }
         }
 
-        // Atomically claim the participant
+        // Atomically claim the participant in central Firestore
         await updateDoc(docRef, {
           id: docId,
           officialName: officialMatch,
@@ -285,7 +295,7 @@ export const secretSantaService = {
           hasRevealed: false,
         });
 
-        // Update local backup
+        // Update local backup as confirmed synced
         updateLocalParticipantSynced(docId, userEmail);
 
         return {
@@ -296,10 +306,22 @@ export const secretSantaService = {
           isCentral: true,
         };
       } catch (err) {
+        // Preserve local backup even on failure
+        const store = loadLocalStore();
+        const localP = store.production.participants.find((p) => p.normalizedName === norm);
+        if (localP && localP.status !== "REGISTERED") {
+          localP.status = "REGISTERED";
+          localP.registeredByEmail = userEmail;
+          localP.registeredByUid = user.uid;
+          localP.registeredAt = new Date().toISOString();
+          localP.syncedToCentral = false;
+          saveLocalStore(store);
+        }
+
         if (err.message && err.message.includes("already been claimed")) {
           throw err;
         }
-        console.warn("Direct Firestore update notice, checking Cloud Function / local store:", err.message);
+        throw new Error(`Central Firestore registration failed: ${err.message}. A local draft was preserved.`);
       }
     }
 
