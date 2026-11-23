@@ -1,0 +1,231 @@
+@charset "UTF-8";
+
+/* Reset & Box Sizing */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+  background-color: transparent !important;
+  color: #1C1917;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100vh;
+  position: relative;
+  background: transparent !important;
+}
+
+/* 
+  Full-Screen Christmas Background Layer
+  - Snowy Christmas trees illuminated with warm fairy lights
+  - Smooth blur (5px) keeping the scenery clearly visible and recognizable
+*/
+.fixed-christmas-background {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.christmas-bg-img {
+  position: absolute;
+  top: -4%;
+  left: -4%;
+  width: 108%;
+  height: 108%;
+  object-fit: cover;
+  object-position: center center;
+  filter: blur(5px) brightness(1.02);
+  transform: translateZ(0);
+}
+
+/* Light Translucent White & Champagne Overlay */
+.christmas-light-tint {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    135deg, 
+    rgba(255, 255, 255, 0.40) 0%, 
+    rgba(254, 251, 243, 0.34) 50%, 
+    rgba(255, 255, 255, 0.42) 100%
+  );
+}
+
+:root {
+  --santa-inset-top: 6px;
+  --santa-inset-bottom: calc(100vh - 50px);
+  --santa-inset-left: 8px;
+  --santa-inset-right: calc(100vw - 98px);
+}
+
+@media (max-width: 600px) {
+  :root {
+    --santa-inset-top: 5px;
+    --santa-inset-bottom: calc(100vh - 44px);
+    --santa-inset-left: 6px;
+    --santa-inset-right: calc(100vw - 84px);
+  }
+}
+
+/* 
+  Santa's Continuous Route Around ALL FOUR Borders:
+  BOTTOM RIGHT -> BOTTOM LEFT -> TOP LEFT -> TOP RIGHT -> BOTTOM RIGHT
+  Runs at top-level fixed z-index so Santa is ALWAYS visible over all borders!
+*/
+.santa-four-border-rider {
+  animation: santaPerimeterAllBorders 26s linear infinite;
+  will-change: left, top, transform;
+}
+
+@keyframes santaPerimeterAllBorders {
+  /* 1. START AT BOTTOM-RIGHT CORNER (Facing Left) */
+  0% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(0deg);
+  }
+  /* 1b. Move along bottom border from RIGHT TO LEFT */
+  22% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(0deg);
+  }
+  /* Corner 1: Turn Upward at Bottom-Left */
+  23.5% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(45deg);
+  }
+  25% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(90deg);
+  }
+  /* 2. Move UPWARD along left border */
+  47% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-top);
+    transform: scaleX(1) rotate(90deg);
+  }
+  /* Corner 2: Turn Right at Top-Left */
+  47.1% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-top);
+    transform: scaleX(-1) rotate(-90deg);
+  }
+  48.5% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-top);
+    transform: scaleX(-1) rotate(-45deg);
+  }
+  50% {
+    left: var(--santa-inset-left);
+    top: var(--santa-inset-top);
+    transform: scaleX(-1) rotate(0deg);
+  }
+  /* 3. Move RIGHT along top border (Dedicated top flight corridor above tagline) */
+  72% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-top);
+    transform: scaleX(-1) rotate(0deg);
+  }
+  /* Corner 3: Turn Downward at Top-Right */
+  73.5% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-top);
+    transform: scaleX(-1) rotate(45deg);
+  }
+  75% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-top);
+    transform: scaleX(-1) rotate(90deg);
+  }
+  /* 4. Move DOWNWARD along right border */
+  97% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(-1) rotate(90deg);
+  }
+  /* Corner 4: Turn Left at Bottom-Right to smoothly loop */
+  97.1% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(-90deg);
+  }
+  98.5% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(-45deg);
+  }
+  100% {
+    left: var(--santa-inset-right);
+    top: var(--santa-inset-bottom);
+    transform: scaleX(1) rotate(0deg);
+  }
+}
+
+@keyframes gentlePulse {
+  0%, 100% {
+    transform: scale(1);
+    filter: drop-shadow(0 6px 14px rgba(212, 175, 55, 0.4));
+  }
+  50% {
+    transform: scale(1.05);
+    filter: drop-shadow(0 10px 24px rgba(212, 175, 55, 0.65));
+  }
+}
+
+@keyframes revealPop {
+  0% {
+    transform: scale(0.7) rotate(-5deg);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.05) rotate(2deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+/* Metallic Gold Typography Utility */
+.metallic-gold-text {
+  background: linear-gradient(135deg, #78350F 0%, #B45309 40%, #D4AF37 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Soft Champagne Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(253, 251, 247, 0.6);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D4AF37;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #B45309;
+}

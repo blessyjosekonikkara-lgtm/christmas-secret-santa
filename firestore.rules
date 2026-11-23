@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if the caller is the authorized administrator
+    function isAdmin() {
+      return request.auth != null && 
+        request.auth.token.email != null && 
+        request.auth.token.email.lower() == 'blessyjosekonikkara@gmail.com';
+    }
+
+    // 1. Participants collection (Production)
+    match /participants/{participantId} {
+      allow read: if request.auth != null;
+      // Admin has full CRUD permissions (Add, Edit, Delete)
+      allow write: if isAdmin();
+      // Ordinary user claiming pending participant under their verified email
+      // Supports multiple family members claiming under the same email
+      allow update: if request.auth != null &&
+        resource.data.status == 'PENDING' &&
+        request.resource.data.status == 'REGISTERED' &&
+        request.resource.data.registeredByEmail.lower() == request.auth.token.email.lower() &&
+        request.resource.data.registeredByUid == request.auth.uid &&
+        request.resource.data.officialName == resource.data.officialName;
+    }
+
+    // 2. Dummy Participants collection (for testing environment)
+    match /dummy_participants/{participantId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // 3. Secret Santa Assignments collection
+    // HIGH SECURITY: Ordinary members can ONLY read their own family's assigned friends!
+    // Ordinary members can NEVER read the entire collection or anyone else's assignment!
+    match /assignments/{assignmentId} {
+      allow read: if isAdmin() || (
+        request.auth != null && (
+          resource.data.giverRegisteredByEmail.lower() == request.auth.token.email.lower() ||
+          resource.data.giverRegisteredByUid == request.auth.uid
+        )
+      );
+      
+      // Only Admin can create/update/delete assignments before they are locked
+      allow create: if isAdmin();
+      allow update: if isAdmin() && (!resource.data.locked);
+      allow delete: if isAdmin() && (!resource.data.locked);
+    }
+
+    // 4. Dummy Assignments (for testing environment)
+    match /dummy_assignments/{assignmentId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // 5. System Settings (lock status, assignment status)
+    match /systemSettings/{settingId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // 6. User Profiles
+    match /users/{userId} {
+      allow read, write: if request.auth != null && (request.auth.uid == userId || isAdmin());
+    }
+  }
+}
