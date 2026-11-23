@@ -9,22 +9,50 @@ service cloud.firestore {
         request.auth.token.email.lower() == 'blessyjosekonikkara@gmail.com';
     }
 
-    // 1. Participants collection (Production)
+    // 1. Official Participants Collection (Production - 45 Real Family Members)
+    // STRICT PRIVACY PROTECTION:
+    // - Admin can read the entire collection of participants.
+    // - Authenticated family members can ONLY read:
+    //    a) PENDING participants (to know which names remain available).
+    //    b) REGISTERED participants claimed by their OWN verified email.
+    // - Ordinary members CAN NEVER read who registered other family names or list other emails!
     match /participants/{participantId} {
-      allow read: if request.auth != null;
-      // Admin has full CRUD permissions (Add, Edit, Delete)
-      allow write: if isAdmin();
-      // Ordinary user claiming pending participant under their verified email
-      // Supports multiple family members claiming under the same email
-      allow update: if request.auth != null &&
+      allow read: if isAdmin() || (
+        request.auth != null && (
+          resource.data.status == 'PENDING' ||
+          (
+            resource.data.status == 'REGISTERED' && 
+            resource.data.registeredByEmail != null &&
+            resource.data.registeredByEmail.lower() == request.auth.token.email.lower()
+          )
+        )
+      );
+
+      // Only Admin can create or delete participants (e.g. seeding initial 45 roster)
+      allow create: if isAdmin();
+      allow delete: if isAdmin();
+
+      // Updates:
+      // - Admin has full update capability.
+      // - Ordinary authenticated users can ONLY claim a PENDING official participant:
+      //    * Must be currently PENDING (atomic lock prevents double-claiming)
+      //    * Status changes strictly to REGISTERED
+      //    * registeredByEmail must match authenticated token email
+      //    * registeredByUid must match authenticated user id
+      //    * officialName and id must match existing document values (no arbitrary name spoofing)
+      allow update: if isAdmin() || (
+        request.auth != null &&
         resource.data.status == 'PENDING' &&
         request.resource.data.status == 'REGISTERED' &&
+        request.resource.data.registeredByEmail != null &&
         request.resource.data.registeredByEmail.lower() == request.auth.token.email.lower() &&
         request.resource.data.registeredByUid == request.auth.uid &&
-        request.resource.data.officialName == resource.data.officialName;
+        request.resource.data.officialName == resource.data.officialName &&
+        request.resource.data.id == resource.data.id
+      );
     }
 
-    // 2. Dummy Participants collection (for testing environment)
+    // 2. Dummy Participants collection (Isolated testing sandbox: ALICE, BOB, CHARLIE, DAVID)
     match /dummy_participants/{participantId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null;
@@ -32,7 +60,7 @@ service cloud.firestore {
 
     // 3. Secret Santa Assignments collection
     // HIGH SECURITY: Ordinary members can ONLY read their own family's assigned friends!
-    // Ordinary members can NEVER read the entire collection or anyone else's assignment!
+    // Ordinary members can NEVER read anyone else's assignment or the complete matrix!
     match /assignments/{assignmentId} {
       allow read: if isAdmin() || (
         request.auth != null && (
@@ -47,7 +75,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && (!resource.data.locked);
     }
 
-    // 4. Dummy Assignments (for testing environment)
+    // 4. Dummy Assignments (Isolated testing sandbox only)
     match /dummy_assignments/{assignmentId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null;

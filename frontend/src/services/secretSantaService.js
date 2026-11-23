@@ -2,7 +2,8 @@ import {
   OFFICIAL_PARTICIPANTS, 
   DUMMY_PARTICIPANTS, 
   ADMIN_EMAIL, 
-  normalizeName 
+  normalizeName,
+  matchOfficialParticipant 
 } from "../config/participants";
 import { 
   auth, 
@@ -14,6 +15,18 @@ import {
   signOut,
   isLiveFirebaseConfigured 
 } from "../config/firebase";
+import { 
+  collection, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  setDoc, 
+  updateDoc, 
+  query, 
+  where, 
+  onSnapshot, 
+  writeBatch 
+} from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 
 const STORAGE_KEY = "SECRET_SANTA_REAL_FAMILY_ROSTER_V1";
@@ -40,6 +53,7 @@ function loadLocalStore() {
       registeredByUid: null,
       registeredAt: null,
       hasRevealed: false,
+      syncedToCentral: false,
     };
   });
 
@@ -58,7 +72,7 @@ function loadLocalStore() {
     };
   });
 
-  // Separate sandbox assignments for dummy testing environment only
+  // Sandbox dummy assignments for isolated testing only
   const dummySandboxAssignments = [
     { giverId: "alice", giverName: "ALICE", giverRegisteredByEmail: null, receiverId: "bob", receiverName: "BOB", locked: true, hasRevealed: false },
     { giverId: "bob", giverName: "BOB", giverRegisteredByEmail: null, receiverId: "charlie", receiverName: "CHARLIE", locked: true, hasRevealed: false },
@@ -92,6 +106,22 @@ function loadLocalStore() {
 
 function saveLocalStore(store) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function updateLocalParticipantSynced(docId, email) {
+  try {
+    const store = loadLocalStore();
+    const p = store.production.participants.find((x) => x.id === docId);
+    if (p) {
+      p.status = "REGISTERED";
+      p.registeredByEmail = email.toLowerCase();
+      p.syncedToCentral = true;
+      p.syncedAt = new Date().toISOString();
+      saveLocalStore(store);
+    }
+  } catch (e) {
+    console.warn("Could not mark local participant as synced:", e);
+  }
 }
 
 export function generateClientDerangement(items) {
@@ -166,44 +196,141 @@ export const secretSantaService = {
     return { user: simulatedUser };
   },
 
-  // 2. Register Participant under Email (Multi-Member Support!)
+  // 2. Safe Central Seeding (Admin Only, Non-Destructive Merge)
+  async initializeParticipantsIfEmpty(user) {
+    if (!isLiveFirebaseConfigured || !db) return { initialized: false, count: 0 };
+    if (!user || user.email?.toLowerCase() !== ADMIN_EMAIL.toLowerCase()) {
+      return { initialized: false, count: 0 };
+    }
+
+    try {
+      const snap = await getDocs(collection(db, "participants"));
+      if (snap.size === 0) {
+        const batch = writeBatch(db);
+        for (const name of OFFICIAL_PARTICIPANTS) {
+          const norm = normalizeName(name);
+          const docId = norm.replace(/\s+/g, "_");
+          const ref = doc(db, "participants", docId);
+          batch.set(
+            ref,
+            {
+              id: docId,
+              officialName: name.trim(),
+              normalizedName: norm,
+              status: "PENDING",
+              registeredByEmail: null,
+              registeredByUid: null,
+              registeredAt: null,
+              hasRevealed: false,
+            },
+            { merge: true }
+          );
+        }
+        await batch.commit();
+        return { initialized: true, count: OFFICIAL_PARTICIPANTS.length };
+      }
+      return { initialized: false, count: snap.size };
+    } catch (err) {
+      console.warn("Could not check/seed Firestore participants:", err);
+      return { initialized: false, error: err.message };
+    }
+  },
+
+  // 3. Register Participant (Direct Firestore with Fallback & Local Backup)
   async registerParticipant(name, user, environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
+    const officialMatch = matchOfficialParticipant(name);
+    if (!officialMatch) {
+      throw new Error(`"${name.trim()}" is not found in the official 45 participant list.`);
+    }
+
+    const userEmail = user?.email?.toLowerCase();
+    if (!userEmail) {
+      throw new Error("A verified email address is required to register.");
+    }
+
+    const norm = normalizeName(officialMatch);
+    const docId = norm.replace(/\s+/g, "_");
+
+    // Attempt direct Firestore registration first if live Firebase is active
+    if (isLiveFirebaseConfigured && db && environment === "production") {
       try {
-        const fn = httpsCallable(functions, "registerParticipant");
-        const res = await fn({ name, environment });
-        return res.data;
+        const docRef = doc(db, "participants", docId);
+        const snap = await getDoc(docRef);
+
+        if (snap.exists()) {
+          const cur = snap.data();
+          if (cur.status === "REGISTERED") {
+            if (cur.registeredByEmail?.toLowerCase() === userEmail) {
+              updateLocalParticipantSynced(docId, userEmail);
+              return {
+                alreadyRegisteredByYou: true,
+                officialName: cur.officialName,
+                participantId: cur.id,
+                hasRevealed: Boolean(cur.hasRevealed),
+                isCentral: true,
+              };
+            }
+            throw new Error(`"${cur.officialName}" has already been claimed by another family account.`);
+          }
+        }
+
+        // Atomically claim the participant
+        await updateDoc(docRef, {
+          id: docId,
+          officialName: officialMatch,
+          status: "REGISTERED",
+          registeredByEmail: userEmail,
+          registeredByUid: user.uid || "uid_" + userEmail.replace(/[^a-zA-Z0-9]/g, "_"),
+          registeredAt: new Date().toISOString(),
+          hasRevealed: false,
+        });
+
+        // Update local backup
+        updateLocalParticipantSynced(docId, userEmail);
+
+        return {
+          success: true,
+          officialName: officialMatch,
+          participantId: docId,
+          hasRevealed: false,
+          isCentral: true,
+        };
       } catch (err) {
-        console.warn("Live function error, falling back to local simulation:", err.message);
+        if (err.message && err.message.includes("already been claimed")) {
+          throw err;
+        }
+        console.warn("Direct Firestore update notice, checking Cloud Function / local store:", err.message);
       }
     }
 
+    // Local Storage Preservation & Fallback
     const store = loadLocalStore();
     const envData = store[environment];
-    const norm = normalizeName(name);
 
     const participant = envData.participants.find((p) => p.normalizedName === norm);
     if (!participant) {
-      throw new Error(`"${name.trim()}" is not found in the official participant list. Please verify exact spelling.`);
+      throw new Error(`"${name.trim()}" is not found in the official participant list.`);
     }
 
     if (participant.status === "REGISTERED") {
-      if (participant.registeredByEmail === user.email.toLowerCase()) {
+      if (participant.registeredByEmail === userEmail) {
         return {
           alreadyRegisteredByYou: true,
           officialName: participant.officialName,
           participantId: participant.id,
           hasRevealed: Boolean(participant.hasRevealed),
+          isCentral: false,
         };
       }
       throw new Error(`"${participant.officialName}" has already been registered by another account.`);
     }
 
     participant.status = "REGISTERED";
-    participant.registeredByEmail = user.email.toLowerCase();
+    participant.registeredByEmail = userEmail;
     participant.registeredByUid = user.uid;
     participant.registeredAt = new Date().toISOString();
     participant.hasRevealed = false;
+    participant.syncedToCentral = false;
 
     saveLocalStore(store);
 
@@ -212,14 +339,143 @@ export const secretSantaService = {
       officialName: participant.officialName,
       participantId: participant.id,
       hasRevealed: false,
+      isCentral: false,
     };
   },
 
-  // 2b. Get Available Roster for Name Dropdown Selection
-  async getAvailableRoster(user, environment = "production") {
+  // 4. Safe Recovery / Synchronization of Local Registrations to Central Firestore
+  async syncLocalRegistrationsToFirestore(user, environment = "production") {
+    if (!user || !user.email) return { syncedCount: 0, errors: [] };
+    const userEmail = user.email.toLowerCase();
+
     const store = loadLocalStore();
     const envData = store[environment];
+
+    // Find all records locally claimed by this verified email
+    const localClaims = envData.participants.filter(
+      (p) => p.status === "REGISTERED" && p.registeredByEmail && p.registeredByEmail.toLowerCase() === userEmail
+    );
+
+    if (localClaims.length === 0) {
+      return { syncedCount: 0, recoveredMembers: [] };
+    }
+
+    const recoveredMembers = [];
+    const errors = [];
+
+    if (isLiveFirebaseConfigured && db && environment === "production") {
+      for (const claim of localClaims) {
+        const officialMatch = matchOfficialParticipant(claim.officialName);
+        if (!officialMatch) {
+          errors.push(`Name "${claim.officialName}" not in official roster.`);
+          continue;
+        }
+
+        const docId = claim.id;
+        try {
+          const docRef = doc(db, "participants", docId);
+          const snap = await getDoc(docRef);
+
+          if (snap.exists()) {
+            const cur = snap.data();
+            if (cur.status === "REGISTERED") {
+              if (cur.registeredByEmail?.toLowerCase() === userEmail) {
+                // Already successfully recorded in Firestore
+                claim.syncedToCentral = true;
+                recoveredMembers.push(officialMatch);
+                continue;
+              } else {
+                errors.push(`"${officialMatch}" was claimed in the central database by another account.`);
+                continue;
+              }
+            }
+          }
+
+          // Write claim to central Firestore
+          await updateDoc(docRef, {
+            id: docId,
+            officialName: officialMatch,
+            status: "REGISTERED",
+            registeredByEmail: userEmail,
+            registeredByUid: user.uid || "uid_" + userEmail.replace(/[^a-zA-Z0-9]/g, "_"),
+            registeredAt: claim.registeredAt || new Date().toISOString(),
+            hasRevealed: Boolean(claim.hasRevealed),
+          });
+
+          claim.syncedToCentral = true;
+          recoveredMembers.push(officialMatch);
+        } catch (err) {
+          console.warn(`Could not sync ${officialMatch} to Firestore:`, err.message);
+          errors.push(`Sync error for ${officialMatch}: ${err.message}`);
+        }
+      }
+      saveLocalStore(store);
+    } else {
+      // Offline / demo fallback - local claims remain marked
+      for (const claim of localClaims) {
+        recoveredMembers.push(claim.officialName);
+      }
+    }
+
+    return {
+      syncedCount: recoveredMembers.length,
+      recoveredMembers,
+      errors,
+    };
+  },
+
+  // 5. Get Available Roster (Dropdown Selection with Strict Privacy Protection)
+  async getAvailableRoster(user, environment = "production") {
     const userEmail = user?.email?.toLowerCase();
+    const isAdminUser = userEmail === ADMIN_EMAIL.toLowerCase();
+
+    if (isLiveFirebaseConfigured && db && environment === "production") {
+      try {
+        // Query only pending participants (allowed for authenticated users)
+        const pendingSnap = await getDocs(query(collection(db, "participants"), where("status", "==", "PENDING")));
+        const pendingIds = new Set(pendingSnap.docs.map((d) => d.id));
+
+        // Query only participants claimed by current user's email (allowed for owner)
+        let myClaimedIds = new Set();
+        if (userEmail) {
+          const mySnap = await getDocs(
+            query(collection(db, "participants"), where("registeredByEmail", "==", userEmail))
+          );
+          myClaimedIds = new Set(mySnap.docs.map((d) => d.id));
+        }
+
+        // If admin, can optionally inspect all
+        let allParticipantsMap = null;
+        if (isAdminUser) {
+          const allSnap = await getDocs(collection(db, "participants"));
+          allParticipantsMap = new Map(allSnap.docs.map((d) => [d.id, d.data()]));
+        }
+
+        return OFFICIAL_PARTICIPANTS.map((name) => {
+          const norm = normalizeName(name);
+          const id = norm.replace(/\s+/g, "_");
+
+          const isClaimedByYou = myClaimedIds.has(id);
+          const isPending = pendingIds.has(id);
+          const isClaimedByOther = !isPending && !isClaimedByYou;
+
+          return {
+            id,
+            name: name.trim(),
+            status: isPending ? "PENDING" : "REGISTERED",
+            isClaimedByYou,
+            isClaimedByOther,
+            isAvailable: isPending,
+          };
+        });
+      } catch (err) {
+        console.warn("Live roster query notice, using local store:", err.message);
+      }
+    }
+
+    // Local Store Fallback
+    const store = loadLocalStore();
+    const envData = store[environment];
 
     return envData.participants.map((p) => {
       const isClaimedByYou = Boolean(p.registeredByEmail && userEmail && p.registeredByEmail === userEmail);
@@ -235,337 +491,121 @@ export const secretSantaService = {
     });
   },
 
-  // 2c. Reset Testing Environment (Clean Slate for Dummy Testing)
-  async resetTestingEnvironment() {
-    const participants = OFFICIAL_PARTICIPANTS.map((name) => {
-      const norm = normalizeName(name);
-      return {
-        id: norm.replace(/\s+/g, "_"),
-        officialName: name.trim(),
-        normalizedName: norm,
-        status: "PENDING",
-        registeredByEmail: null,
-        registeredByUid: null,
-        registeredAt: null,
-        hasRevealed: false,
-      };
-    });
-
-    const resetStore = {
-      production: {
-        participants,
-        assignments: [],
-        assignmentsGenerated: false,
-        assignmentsLocked: false,
-        generatedAt: null,
-        lockedAt: null,
-      },
-      dummy: {
-        participants: [...participants],
-        assignments: [],
-        assignmentsGenerated: false,
-        assignmentsLocked: false,
-        generatedAt: null,
-        lockedAt: null,
-      },
-      users: {},
-    };
-
-    saveLocalStore(resetStore);
-    localStorage.removeItem("SECRET_SANTA_SELECTED_MEMBER_ID");
-    return { success: true };
-  },
-
-  // 3. Get Family Members and Assigned Friends for User
+  // 6. Get My Family Assignments (Multi-Member under Verified Email)
   async getMyFamilyAssignments(user, environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
+    const userEmail = user?.email?.toLowerCase();
+    if (!userEmail) return { familyMembers: [], familyAssignments: [] };
+
+    let members = [];
+    let assignments = [];
+
+    if (isLiveFirebaseConfigured && db && environment === "production") {
       try {
-        const fn = httpsCallable(functions, "getMyFamilyAssignments");
-        const res = await fn({ environment });
-        return res.data;
+        const memberSnap = await getDocs(
+          query(collection(db, "participants"), where("registeredByEmail", "==", userEmail))
+        );
+        members = memberSnap.docs.map((d) => ({ ...d.data(), id: d.id }));
+
+        const assignSnap = await getDocs(
+          query(collection(db, "assignments"), where("giverRegisteredByEmail", "==", userEmail))
+        );
+        assignments = assignSnap.docs.map((d) => ({ ...d.data(), id: d.id }));
       } catch (err) {
-        console.warn("Live function error, falling back to local simulation:", err.message);
+        console.warn("Could not fetch remote family assignments, using local backup:", err.message);
       }
     }
 
+    // Merge with local storage to guarantee zero data loss
     const store = loadLocalStore();
     const envData = store[environment];
-    const userEmail = user.email.toLowerCase();
-
-    const family = envData.participants.filter(
-      (p) => p.registeredByEmail && p.registeredByEmail === userEmail
+    const localMine = envData.participants.filter(
+      (p) => p.status === "REGISTERED" && p.registeredByEmail && p.registeredByEmail.toLowerCase() === userEmail
     );
 
-    if (!envData.assignmentsGenerated) {
-      return {
-        status: "NOT_GENERATED",
-        locked: false,
-        familyMembers: family.map((m) => ({
-          id: m.id,
-          officialName: m.officialName,
-          assignedFriend: null,
-          hasRevealed: false,
-        })),
-      };
+    for (const loc of localMine) {
+      if (!members.find((m) => m.id === loc.id)) {
+        members.push({ ...loc, isLocalOnly: true });
+      }
     }
 
-    const familyWithFriends = family.map((m) => {
-      const assignment = envData.assignments.find((a) => a.giverId === m.id);
-      const isRevealed = Boolean(m.hasRevealed || assignment?.hasRevealed);
-      return {
-        id: m.id,
-        officialName: m.officialName,
-        assignedFriend: assignment ? assignment.receiverName : null,
-        hasRevealed: isRevealed,
-      };
-    });
+    for (const locAssign of envData.assignments) {
+      if (
+        locAssign.giverRegisteredByEmail &&
+        locAssign.giverRegisteredByEmail.toLowerCase() === userEmail &&
+        !assignments.find((a) => a.giverId === locAssign.giverId)
+      ) {
+        assignments.push(locAssign);
+      }
+    }
 
     return {
-      status: "READY",
-      locked: envData.assignmentsLocked,
-      familyMembers: familyWithFriends,
+      familyMembers: members,
+      familyAssignments: assignments,
+      assignmentsGenerated: envData.assignmentsGenerated,
+      assignmentsLocked: envData.assignmentsLocked,
     };
   },
 
-  // 4. Mark Christmas Friend as Revealed (Permanent Flag)
-  async markFriendRevealed(participantId, environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
+  // 7. Mark Friend Revealed (Automatic Remembrance)
+  async markFriendRevealed(participantId, user, environment = "production") {
+    if (isLiveFirebaseConfigured && db && environment === "production") {
       try {
-        const fn = httpsCallable(functions, "markFriendRevealed");
-        const res = await fn({ participantId, environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function error, falling back to local store:", err.message);
+        const ref = doc(db, "participants", participantId);
+        await updateDoc(ref, { hasRevealed: true });
+      } catch (e) {
+        console.warn("Could not mark friend revealed in Firestore:", e);
       }
     }
 
     const store = loadLocalStore();
     const envData = store[environment];
+    const p = envData.participants.find((x) => x.id === participantId);
+    if (p) p.hasRevealed = true;
 
-    const participant = envData.participants.find((p) => p.id === participantId);
-    if (participant) {
-      participant.hasRevealed = true;
-      participant.revealedAt = new Date().toISOString();
-    }
-
-    const assignment = envData.assignments.find((a) => a.giverId === participantId);
-    if (assignment) {
-      assignment.hasRevealed = true;
-      assignment.revealedAt = new Date().toISOString();
-    }
-
-    saveLocalStore(store);
-    return { success: true, participantId };
-  },
-
-  // 5. Admin: Add Participant
-  async addParticipant(officialName, environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
-      try {
-        const fn = httpsCallable(functions, "addParticipant");
-        const res = await fn({ officialName, environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function fallback:", err.message);
-      }
-    }
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-    const norm = normalizeName(officialName);
-
-    if (envData.participants.some((p) => p.normalizedName === norm)) {
-      throw new Error(`Participant "${officialName.trim()}" already exists in the list.`);
-    }
-
-    if (envData.assignmentsLocked) {
-      throw new Error("Assignments are permanently locked. You must reset assignments before adding new participants.");
-    }
-
-    const newId = norm.replace(/\s+/g, "_");
-    envData.participants.push({
-      id: newId,
-      officialName: officialName.trim(),
-      normalizedName: norm,
-      status: "PENDING",
-      registeredByEmail: null,
-      registeredByUid: null,
-      registeredAt: null,
-      hasRevealed: false,
-    });
-
-    saveLocalStore(store);
-    return { success: true, officialName: officialName.trim(), id: newId };
-  },
-
-  // 6. Admin: Edit Participant Name
-  async editParticipant(participantId, newOfficialName, environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
-      try {
-        const fn = httpsCallable(functions, "editParticipant");
-        const res = await fn({ participantId, newOfficialName, environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function fallback:", err.message);
-      }
-    }
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-    const participant = envData.participants.find((p) => p.id === participantId);
-
-    if (!participant) {
-      throw new Error("Participant not found.");
-    }
-
-    participant.officialName = newOfficialName.trim();
-    participant.normalizedName = normalizeName(newOfficialName);
-
-    envData.assignments.forEach((a) => {
-      if (a.giverId === participantId) a.giverName = newOfficialName.trim();
-      if (a.receiverId === participantId) a.receiverName = newOfficialName.trim();
-    });
-
-    saveLocalStore(store);
-    return { success: true, participantId, newOfficialName: newOfficialName.trim() };
-  },
-
-  // 7. Admin: Delete Participant
-  async deleteParticipant(participantId, environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
-      try {
-        const fn = httpsCallable(functions, "deleteParticipant");
-        const res = await fn({ participantId, environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function fallback:", err.message);
-      }
-    }
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-
-    if (envData.assignmentsLocked) {
-      throw new Error("Assignments are locked! Reset assignments first before deleting participants.");
-    }
-
-    const index = envData.participants.findIndex((p) => p.id === participantId);
-    if (index === -1) {
-      throw new Error("Participant not found.");
-    }
-
-    const deleted = envData.participants.splice(index, 1)[0];
-
-    if (envData.assignmentsGenerated) {
-      envData.assignments = [];
-      envData.assignmentsGenerated = false;
-      envData.invalidatedReason = `Participant ${deleted.officialName} was deleted; assignments must be regenerated.`;
-    }
-
-    saveLocalStore(store);
-    return { success: true, deletedName: deleted.officialName };
-  },
-
-  // 8. Admin: Generate Secret Santa Assignments
-  async generateAssignments(environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
-      try {
-        const fn = httpsCallable(functions, "generateAssignments");
-        const res = await fn({ environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function fallback:", err.message);
-      }
-    }
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-
-    if (envData.assignmentsLocked) {
-      throw new Error("Assignments are permanently locked and cannot be regenerated.");
-    }
-
-    if (envData.participants.length < 2) {
-      throw new Error("At least 2 participants are required.");
-    }
-
-    const pairings = generateClientDerangement(envData.participants);
-
-    envData.assignments = pairings;
-    envData.assignmentsGenerated = true;
-    envData.generatedAt = new Date().toISOString();
-
-    saveLocalStore(store);
-    return { success: true, totalAssignments: pairings.length };
-  },
-
-  // 9. Admin: Lock Assignments Permanently
-  async lockAssignments(environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
-      try {
-        const fn = httpsCallable(functions, "lockAssignments");
-        const res = await fn({ environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function fallback:", err.message);
-      }
-    }
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-
-    if (!envData.assignmentsGenerated) {
-      throw new Error("Cannot lock assignments before generating them.");
-    }
-
-    envData.assignmentsLocked = true;
-    envData.lockedAt = new Date().toISOString();
-    envData.assignments.forEach((a) => (a.locked = true));
-
-    saveLocalStore(store);
-    return { success: true, lockedCount: envData.assignments.length };
-  },
-
-  // 10. Admin: Reset Assignments
-  async resetAssignments(environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
-      try {
-        const fn = httpsCallable(functions, "resetAssignments");
-        const res = await fn({ environment });
-        return res.data;
-      } catch (err) {
-        console.warn("Live function fallback:", err.message);
-      }
-    }
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-
-    envData.assignments = [];
-    envData.assignmentsGenerated = false;
-    envData.assignmentsLocked = false;
-    envData.generatedAt = null;
-    envData.lockedAt = null;
+    const assign = envData.assignments.find((x) => x.giverId === participantId);
+    if (assign) assign.hasRevealed = true;
 
     saveLocalStore(store);
     return { success: true };
   },
 
-  // 11. Admin: Get Overview & Complete Matrix
+  // 8. Admin Overview (Single Fetch)
   async getAdminOverview(environment = "production") {
-    if (isLiveFirebaseConfigured && functions) {
+    if (isLiveFirebaseConfigured && db && environment === "production") {
       try {
-        const fn = httpsCallable(functions, "getAdminOverview");
-        const res = await fn({ environment });
-        return res.data;
+        const snap = await getDocs(collection(db, "participants"));
+        if (snap.size > 0) {
+          const participants = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+          const registered = participants.filter((p) => p.status === "REGISTERED");
+          const emails = new Set(registered.map((p) => p.registeredByEmail).filter(Boolean));
+
+          let assignments = [];
+          try {
+            const assignSnap = await getDocs(collection(db, "assignments"));
+            assignments = assignSnap.docs.map((d) => ({ ...d.data(), id: d.id }));
+          } catch (e) {
+            // Assignments empty or not generated yet
+          }
+
+          return {
+            totalInDb: participants.length,
+            registeredCount: registered.length,
+            pendingCount: participants.length - registered.length,
+            uniqueVerifiedEmailsCount: emails.size,
+            assignmentsGenerated: assignments.length > 0,
+            assignmentsLocked: assignments.length > 0 && assignments.every((a) => a.locked),
+            participants,
+            assignments,
+            isCentral: true,
+          };
+        }
       } catch (err) {
-        console.warn("Live function fallback:", err.message);
+        console.warn("Live admin overview fallback to local storage:", err.message);
       }
     }
 
     const store = loadLocalStore();
     const envData = store[environment];
-
     const registered = envData.participants.filter((p) => p.status === "REGISTERED");
     const emails = new Set(registered.map((p) => p.registeredByEmail).filter(Boolean));
 
@@ -578,10 +618,92 @@ export const secretSantaService = {
       assignmentsLocked: envData.assignmentsLocked,
       participants: [...envData.participants],
       assignments: [...envData.assignments],
+      isCentral: false,
     };
   },
 
-  // 12. Reset dummy environment to clean state
+  // 9. Admin Real-Time Listener (Instant Sync to Admin Dashboard)
+  subscribeAdminOverview(callback, environment = "production") {
+    if (isLiveFirebaseConfigured && db && environment === "production") {
+      try {
+        const unsubscribe = onSnapshot(
+          collection(db, "participants"),
+          (snapshot) => {
+            if (snapshot.size === 0) return;
+            const participants = snapshot.docs.map((d) => ({ ...d.data(), id: d.id }));
+            const registered = participants.filter((p) => p.status === "REGISTERED");
+            const emails = new Set(registered.map((p) => p.registeredByEmail).filter(Boolean));
+
+            callback({
+              totalInDb: participants.length,
+              registeredCount: registered.length,
+              pendingCount: participants.length - registered.length,
+              uniqueVerifiedEmailsCount: emails.size,
+              assignmentsGenerated: false,
+              assignmentsLocked: false,
+              participants,
+              assignments: [],
+              isCentral: true,
+            });
+          },
+          (err) => {
+            console.warn("Admin onSnapshot subscription error:", err);
+          }
+        );
+        return unsubscribe;
+      } catch (e) {
+        console.warn("Could not attach real-time admin listener:", e);
+      }
+    }
+    return () => {};
+  },
+
+  // 10. Generate Secret Santa Assignments (Admin Only, Safeguarded)
+  async generateAssignments(environment = "production") {
+    const store = loadLocalStore();
+    const envData = store[environment];
+
+    if (envData.assignmentsLocked) {
+      throw new Error("Assignments are permanently locked and cannot be regenerated.");
+    }
+
+    const participants = envData.participants.filter((p) => p.status === "REGISTERED");
+    if (participants.length < 2) {
+      throw new Error("At least 2 registered participants are required to generate assignments.");
+    }
+
+    const assignments = generateClientDerangement(participants);
+    envData.assignments = assignments;
+    envData.assignmentsGenerated = true;
+    envData.generatedAt = new Date().toISOString();
+
+    saveLocalStore(store);
+
+    return {
+      success: true,
+      totalPairs: assignments.length,
+      assignments,
+    };
+  },
+
+  // 11. Lock Assignments (Admin Only, Safeguarded)
+  async lockAssignments(environment = "production") {
+    const store = loadLocalStore();
+    const envData = store[environment];
+
+    if (!envData.assignmentsGenerated || envData.assignments.length === 0) {
+      throw new Error("No assignments exist to lock. Please generate assignments first.");
+    }
+
+    envData.assignmentsLocked = true;
+    envData.lockedAt = new Date().toISOString();
+    envData.assignments.forEach((a) => (a.locked = true));
+
+    saveLocalStore(store);
+    return { success: true };
+  },
+
+  // 12. Reset Dummy Environment Sandbox
   resetDummyEnvironment() {
     const store = loadLocalStore();
     store.dummy = {
@@ -605,5 +727,39 @@ export const secretSantaService = {
       lockedAt: null,
     };
     saveLocalStore(store);
+  },
+
+  // 13. Export Local Registration Backup Token (For WhatsApp Sharing with Admin)
+  exportLocalRegistrationBackup(user) {
+    try {
+      const store = loadLocalStore();
+      const userEmail = user?.email?.toLowerCase();
+      const registered = store.production.participants.filter(
+        (p) => p.status === "REGISTERED" && (!userEmail || p.registeredByEmail?.toLowerCase() === userEmail)
+      );
+
+      const payload = {
+        app: "ChristmasSecretSanta2026",
+        exportedAt: new Date().toISOString(),
+        userEmail: userEmail || "unknown",
+        registeredMembers: registered.map((m) => ({
+          officialName: m.officialName,
+          registeredAt: m.registeredAt,
+          id: m.id,
+        })),
+      };
+
+      const jsonStr = JSON.stringify(payload);
+      const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+      return {
+        success: true,
+        count: registered.length,
+        members: registered.map((m) => m.officialName),
+        token: `SANTA-BACKUP-${b64}`,
+        payload,
+      };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
   },
 };

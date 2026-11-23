@@ -33,6 +33,13 @@ export default function NameVerificationPage() {
   useEffect(() => {
     const loadRoster = async () => {
       try {
+        if (user?.email) {
+          try {
+            await secretSantaService.syncLocalRegistrationsToFirestore(user);
+          } catch (e) {
+            console.warn("Auto-sync notice:", e);
+          }
+        }
         const list = await secretSantaService.getAvailableRoster(user);
         setRoster(list);
       } catch (e) {

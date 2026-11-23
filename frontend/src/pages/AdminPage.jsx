@@ -63,6 +63,7 @@ export default function AdminPage() {
   const [deletingParticipant, setDeletingParticipant] = useState(null);
 
   const [confirmLockModalOpen, setConfirmLockModalOpen] = useState(false);
+  const [syncingLocal, setSyncingLocal] = useState(false);
 
   const isAdmin = user && user.email && user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
 
@@ -70,6 +71,8 @@ export default function AdminPage() {
     setLoading(true);
     setError("");
     try {
+      // Safe check to ensure the 45 participants are seeded in Firestore if empty
+      await secretSantaService.initializeParticipantsIfEmpty(user);
       const overview = await secretSantaService.getAdminOverview("production");
       setData(overview);
     } catch (err) {
@@ -82,8 +85,35 @@ export default function AdminPage() {
   useEffect(() => {
     if (isAdmin) {
       loadData();
+      // Attach real-time Firestore listener for live registration updates
+      const unsubscribe = secretSantaService.subscribeAdminOverview((liveOverview) => {
+        setData(liveOverview);
+        setLoading(false);
+      }, "production");
+
+      return () => {
+        if (typeof unsubscribe === "function") unsubscribe();
+      };
     }
   }, [isAdmin]);
+
+  const handleSyncLocalRegistrations = async () => {
+    setSyncingLocal(true);
+    setError("");
+    try {
+      const res = await secretSantaService.syncLocalRegistrationsToFirestore(user, "production");
+      if (res.syncedCount > 0) {
+        setSuccessMessage(`Successfully recovered and synced ${res.syncedCount} member(s): ${res.recoveredMembers.join(", ")}`);
+      } else {
+        setSuccessMessage("All local registrations on this device are already synced to the Central Cloud.");
+      }
+      await loadData();
+    } catch (e) {
+      setError(e.message || "Could not sync local registrations.");
+    } finally {
+      setSyncingLocal(false);
+    }
+  };
 
   if (!isAdmin) {
     return (
@@ -217,15 +247,43 @@ export default function AdminPage() {
       {/* Admin Header */}
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 3, flexWrap: "wrap", gap: 2 }}>
         <Box>
-          <Typography variant="h4" sx={{ color: "#78350F", fontWeight: 900, letterSpacing: 1 }}>
-            🎅 Admin Secret Santa Console
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Typography variant="h4" sx={{ color: "#78350F", fontWeight: 900, letterSpacing: 1 }}>
+              🎅 Admin Secret Santa Console
+            </Typography>
+            <Chip 
+              label={data?.isCentral ? "Central Cloud Live ☁️" : "Local Backup"} 
+              size="small" 
+              sx={{ 
+                bgcolor: data?.isCentral ? "rgba(16, 185, 129, 0.15)" : "rgba(245, 158, 11, 0.15)",
+                color: data?.isCentral ? "#065F46" : "#92400E",
+                fontWeight: 800,
+                border: "1px solid",
+                borderColor: data?.isCentral ? "#10B981" : "#F59E0B"
+              }} 
+            />
+          </Box>
           <Typography variant="body2" sx={{ color: "#57534E" }}>
             Administrator: <strong>{ADMIN_EMAIL}</strong>
           </Typography>
         </Box>
 
         <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+          <Button
+            variant="outlined"
+            onClick={handleSyncLocalRegistrations}
+            disabled={syncingLocal}
+            sx={{
+              fontWeight: 800,
+              borderColor: "#10B981",
+              color: "#065F46",
+              bgcolor: "rgba(16, 185, 129, 0.08)",
+              "&:hover": { bgcolor: "rgba(16, 185, 129, 0.15)", borderColor: "#059669" }
+            }}
+          >
+            {syncingLocal ? "Syncing..." : "Sync Device Records ☁️"}
+          </Button>
+
           <Button
             variant="contained"
             startIcon={<PersonAddIcon />}

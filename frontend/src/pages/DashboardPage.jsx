@@ -33,6 +33,8 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [assignmentData, setAssignmentData] = useState(null);
   const [error, setError] = useState("");
+  const [syncStatusMsg, setSyncStatusMsg] = useState("");
+  const [backupCopied, setBackupCopied] = useState(false);
 
   // Modal for linking another family member to this email
   const [addMemberModalOpen, setAddMemberModalOpen] = useState(false);
@@ -47,12 +49,48 @@ export default function DashboardPage() {
     if (!user) return;
     setLoading(true);
     try {
+      // Auto-recover/sync any local registrations on this device to central Firestore
+      try {
+        const syncRes = await secretSantaService.syncLocalRegistrationsToFirestore(user);
+        if (syncRes.syncedCount > 0) {
+          setSyncStatusMsg(`✓ Synced ${syncRes.syncedCount} family member(s) to Central Cloud ☁️`);
+          await refreshFamily();
+        }
+      } catch (syncErr) {
+        console.warn("Background auto-sync notice:", syncErr);
+      }
+
       const data = await secretSantaService.getMyFamilyAssignments(user);
       setAssignmentData(data);
     } catch (err) {
       setError(err.message || "Failed to load Secret Santa assignment.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleManualSync = async () => {
+    try {
+      const res = await secretSantaService.syncLocalRegistrationsToFirestore(user);
+      if (res.syncedCount > 0) {
+        setSyncStatusMsg(`✓ Synced ${res.syncedCount} member(s) to Central Cloud!`);
+        await refreshFamily();
+        await fetchAssignments();
+      } else {
+        setSyncStatusMsg("✓ All your family registrations are already synced with Central Cloud!");
+      }
+    } catch (e) {
+      setSyncStatusMsg("Sync note: " + (e.message || "Could not sync."));
+    }
+  };
+
+  const handleCopyBackup = () => {
+    const backup = secretSantaService.exportLocalRegistrationBackup(user);
+    if (backup.success) {
+      const text = `🎅 SECRET SANTA VERIFICATION BACKUP:\nEmail: ${user.email}\nRegistered: ${backup.members.join(", ")}\nToken: ${backup.token}`;
+      navigator.clipboard.writeText(text);
+      setBackupCopied(true);
+      setTimeout(() => setBackupCopied(false), 3000);
     }
   };
 
@@ -188,9 +226,33 @@ export default function DashboardPage() {
             textAlign: "center",
           }}
         >
-          <Typography variant="caption" sx={{ color: "#92400E", fontWeight: 800, letterSpacing: 1, display: "block", mb: 1.2 }}>
-            REGISTERED FAMILY MEMBERS UNDER THIS EMAIL:
-          </Typography>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1.2, flexWrap: "wrap", gap: 1 }}>
+            <Typography variant="caption" sx={{ color: "#92400E", fontWeight: 800, letterSpacing: 1 }}>
+              REGISTERED FAMILY MEMBERS UNDER THIS EMAIL:
+            </Typography>
+            <Box sx={{ display: "flex", gap: 1 }}>
+              <Button
+                size="small"
+                onClick={handleManualSync}
+                sx={{ fontSize: "0.75rem", color: "#065F46", fontWeight: 700, textTransform: "none", py: 0.2 }}
+              >
+                ☁️ Sync with Cloud
+              </Button>
+              <Button
+                size="small"
+                onClick={handleCopyBackup}
+                sx={{ fontSize: "0.75rem", color: "#92400E", fontWeight: 700, textTransform: "none", py: 0.2 }}
+              >
+                {backupCopied ? "✓ Copied Backup!" : "📋 Backup Token"}
+              </Button>
+            </Box>
+          </Box>
+
+          {syncStatusMsg && (
+            <Alert severity="success" sx={{ py: 0.5, mb: 1.5, fontSize: "0.85rem" }} onClose={() => setSyncStatusMsg("")}>
+              {syncStatusMsg}
+            </Alert>
+          )}
 
           <Box sx={{ display: "flex", gap: 1.2, justifyContent: "center", alignItems: "center", flexWrap: "wrap" }}>
             {familyMembers.map((member) => {
