@@ -4,13 +4,14 @@
   "description": "Christmas Secret Santa Platform",
   "main": "index.js",
   "scripts": {
-    "test": "node scripts/testSuite.js"
+    "test": "node scripts/testSuite.js && node scripts/testMongoApi.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "firebase-admin": "^14.5.1",
     "mongodb": "^6.5.0"
   }
 }

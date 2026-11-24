@@ -1,11 +1,14 @@
 const assert = require("assert");
+const { mock } = require("node:test");
+const { initializeApp } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
 const {
   ADMIN_EMAIL,
   OFFICIAL_PARTICIPANTS,
   normalizeName,
   matchOfficialParticipant,
   __setMockDatabase,
-} = require("../api/db");
+} = require("../api/_db");
 
 const participantsHandler = require("../api/participants");
 const registerHandler = require("../api/register");
@@ -218,6 +221,24 @@ async function runMongoApiTestSuite() {
   const mockDb = new MockMongoDatabase();
   __setMockDatabase(mockDb);
 
+  process.env.VITE_FIREBASE_PROJECT_ID = "secret-santa-test";
+  const firebaseAuth = getAuth(initializeApp({ projectId: process.env.VITE_FIREBASE_PROJECT_ID }));
+  const { req: legacyReq, res: legacyRes } = createReqRes({
+    headers: { authorization: `Bearer dev_token_${ADMIN_EMAIL}` },
+  });
+  await adminHandler(legacyReq, legacyRes);
+  assert.strictEqual(legacyRes.statusCode, 403);
+
+  const fixtureEmails = [ADMIN_EMAIL, "user1@example.com", "family@example.com", "user1@family.com", "user2@other.com"];
+  const fixtures = new Map(fixtureEmails.map((email) => [
+    `test-session-${email}`, { email, email_verified: true, uid: `test-uid-${email}` },
+  ]));
+  mock.method(firebaseAuth, "verifyIdToken", async (token) => {
+    const claims = fixtures.get(token);
+    if (!claims) throw Object.assign(new Error("Unknown fixture"), { code: "auth/argument-error" });
+    return claims;
+  });
+
   // -------------------------------------------------------------
   // SUITE 1: Auto-Seed & Roster Integrity
   // -------------------------------------------------------------
@@ -243,20 +264,20 @@ async function runMongoApiTestSuite() {
   assert.strictEqual(pRes1.body.participants[0].registeredByUid, undefined);
   console.log("  ✓ Unauthenticated user receives sanitized roster with 0 email/UID exposures.");
 
-  // Ordinary User query (dev_token_user1@example.com)
+  // Ordinary user query
   const { req: pReq2, res: pRes2 } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user1@example.com" },
+    headers: { authorization: "Bearer test-session-user1@example.com" },
   });
   await participantsHandler(pReq2, pRes2);
   assert.strictEqual(pRes2.statusCode, 200);
   assert.strictEqual(pRes2.body.isAdmin, false);
   console.log("  ✓ Ordinary user recognized with isAdmin: false and strict scoping.");
 
-  // Admin query (dev_token_blessyjosekonikkara@gmail.com)
+  // Admin query
   const { req: pReqAdmin, res: pResAdmin } = createReqRes({
     method: "GET",
-    headers: { authorization: `Bearer dev_token_${ADMIN_EMAIL}` },
+    headers: { authorization: `Bearer test-session-${ADMIN_EMAIL}` },
   });
   await participantsHandler(pReqAdmin, pResAdmin);
   assert.strictEqual(pResAdmin.statusCode, 200);
@@ -282,7 +303,7 @@ async function runMongoApiTestSuite() {
   // Test 3b: Non-official name registration attempt
   const { req: rReqInvalid, res: rResInvalid } = createReqRes({
     method: "POST",
-    headers: { authorization: "Bearer dev_token_family@example.com" },
+    headers: { authorization: "Bearer test-session-family@example.com" },
     body: { name: "SANTA CLAUS" },
   });
   await registerHandler(rReqInvalid, rResInvalid);
@@ -292,7 +313,7 @@ async function runMongoApiTestSuite() {
   // Test 3c: Valid registration of SR BLESSY by user1
   const { req: rReq1, res: rRes1 } = createReqRes({
     method: "POST",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     body: { name: "SR BLESSY" },
   });
   await registerHandler(rReq1, rRes1);
@@ -304,7 +325,7 @@ async function runMongoApiTestSuite() {
   // Test 3d: Idempotent re-registration by SAME user
   const { req: rReqSame, res: rResSame } = createReqRes({
     method: "POST",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     body: { name: "SR BLESSY" },
   });
   await registerHandler(rReqSame, rResSame);
@@ -315,7 +336,7 @@ async function runMongoApiTestSuite() {
   // Test 3e: Double-claim attempt by DIFFERENT user (user2 tries to claim SR BLESSY)
   const { req: rReqOther, res: rResOther } = createReqRes({
     method: "POST",
-    headers: { authorization: "Bearer dev_token_user2@other.com" },
+    headers: { authorization: "Bearer test-session-user2@other.com" },
     body: { name: "SR BLESSY" },
   });
   await registerHandler(rReqOther, rResOther);
@@ -326,7 +347,7 @@ async function runMongoApiTestSuite() {
   // Test 3f: Multi-member family registration under SAME email (user1 claims JOSE)
   const { req: rReqMulti, res: rResMulti } = createReqRes({
     method: "POST",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     body: { name: "JOSE" },
   });
   await registerHandler(rReqMulti, rResMulti);
@@ -343,7 +364,7 @@ async function runMongoApiTestSuite() {
   // Test 4a: Pre-lock check (assignments not locked yet)
   const { req: fReqPreLock, res: fResPreLock } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     query: { participantId: "sr_blessy" },
   });
   await myFriendHandler(fReqPreLock, fResPreLock);
@@ -355,7 +376,7 @@ async function runMongoApiTestSuite() {
   // Test 4b: Unauthorized snooping attempt (user2 queries sr_blessy)
   const { req: fReqSnoop, res: fResSnoop } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user2@other.com" },
+    headers: { authorization: "Bearer test-session-user2@other.com" },
     query: { participantId: "sr_blessy" },
   });
   await myFriendHandler(fReqSnoop, fResSnoop);
@@ -365,7 +386,7 @@ async function runMongoApiTestSuite() {
   // Test 4c: Action 'my-family' returns only family members registered by this email
   const { req: fReqFamily, res: fResFamily } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     query: { action: "my-family" },
   });
   await myFriendHandler(fReqFamily, fResFamily);
@@ -384,7 +405,7 @@ async function runMongoApiTestSuite() {
   // Test 5a: Non-admin trying to call /api/admin
   const { req: aReqNonAdmin, res: aResNonAdmin } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     query: { action: "overview" },
   });
   await adminHandler(aReqNonAdmin, aResNonAdmin);
@@ -394,7 +415,7 @@ async function runMongoApiTestSuite() {
   // Test 5b: Admin overview reflects 2 registered and 43 pending
   const { req: aReqOverview, res: aResOverview } = createReqRes({
     method: "GET",
-    headers: { authorization: `Bearer dev_token_${ADMIN_EMAIL}` },
+    headers: { authorization: `Bearer test-session-${ADMIN_EMAIL}` },
     query: { action: "overview" },
   });
   await adminHandler(aReqOverview, aResOverview);
@@ -402,12 +423,17 @@ async function runMongoApiTestSuite() {
   assert.strictEqual(aResOverview.body.registeredCount, 2);
   assert.strictEqual(aResOverview.body.pendingCount, 43);
   assert.strictEqual(aResOverview.body.assignmentsGenerated, false);
+  assert.strictEqual(aResOverview.headers["Cache-Control"], "private, no-store");
+  const adminJose = aResOverview.body.participants.find((participant) => participant.id === "jose");
+  assert.strictEqual(adminJose.status, "REGISTERED");
+  assert.strictEqual(adminJose.registeredByEmail, "user1@family.com");
+  assert(Number.isFinite(Date.parse(adminJose.registeredAt)));
   console.log("  ✓ Admin overview reports accurate central registration counts (2 registered, 43 pending).");
 
   // Test 5c: Attempting assignment generation when only 2/45 are registered
   const { req: aReqEarlyGen, res: aResEarlyGen } = createReqRes({
     method: "POST",
-    headers: { authorization: `Bearer dev_token_${ADMIN_EMAIL}` },
+    headers: { authorization: `Bearer test-session-${ADMIN_EMAIL}` },
     body: { action: "generate-assignments" },
   });
   await adminHandler(aReqEarlyGen, aResEarlyGen);
@@ -434,7 +460,7 @@ async function runMongoApiTestSuite() {
   // Test 5e: Generate assignments now that all 45 are registered
   const { req: aReqGen, res: aResGen } = createReqRes({
     method: "POST",
-    headers: { authorization: `Bearer dev_token_${ADMIN_EMAIL}` },
+    headers: { authorization: `Bearer test-session-${ADMIN_EMAIL}` },
     body: { action: "generate-assignments" },
   });
   await adminHandler(aReqGen, aResGen);
@@ -464,7 +490,7 @@ async function runMongoApiTestSuite() {
   // Test 5f: Lock assignments
   const { req: aReqLock, res: aResLock } = createReqRes({
     method: "POST",
-    headers: { authorization: `Bearer dev_token_${ADMIN_EMAIL}` },
+    headers: { authorization: `Bearer test-session-${ADMIN_EMAIL}` },
     body: { action: "lock-assignments" },
   });
   await adminHandler(aReqLock, aResLock);
@@ -478,7 +504,7 @@ async function runMongoApiTestSuite() {
   const srBlessyPair = assignments.find((a) => a.giverId === "sr_blessy");
   const { req: fReqPostLock, res: fResPostLock } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user1@family.com" },
+    headers: { authorization: "Bearer test-session-user1@family.com" },
     query: { participantId: "sr_blessy" },
   });
   await myFriendHandler(fReqPostLock, fResPostLock);
@@ -490,7 +516,7 @@ async function runMongoApiTestSuite() {
   // Non-owner still blocked from seeing sr_blessy's friend even after lock
   const { req: fReqPostLockSnoop, res: fResPostLockSnoop } = createReqRes({
     method: "GET",
-    headers: { authorization: "Bearer dev_token_user2@other.com" },
+    headers: { authorization: "Bearer test-session-user2@other.com" },
     query: { participantId: "sr_blessy" },
   });
   await myFriendHandler(fReqPostLockSnoop, fResPostLockSnoop);

@@ -1,19 +1,13 @@
 import { 
-  OFFICIAL_PARTICIPANTS, 
   DUMMY_PARTICIPANTS, 
-  ADMIN_EMAIL, 
   normalizeName,
   matchOfficialParticipant 
 } from "../config/participants";
 import { 
   auth, 
-  db, 
-  functions, 
   sendSignInLinkToEmail, 
   isSignInWithEmailLink, 
-  signInWithEmailLink, 
-  signOut,
-  isLiveFirebaseConfigured 
+  signInWithEmailLink,
 } from "../config/firebase";
 
 const STORAGE_KEY = "SECRET_SANTA_REAL_FAMILY_ROSTER_V1";
@@ -27,22 +21,6 @@ function loadLocalStore() {
       console.warn("Error parsing local store, reinitializing...", e);
     }
   }
-
-  // 45 Real Family Participants (all PENDING, unassigned, DAISY excluded)
-  const participants = OFFICIAL_PARTICIPANTS.map((name) => {
-    const norm = normalizeName(name);
-    return {
-      id: norm.replace(/\s+/g, "_"),
-      officialName: name.trim(),
-      normalizedName: norm,
-      status: "PENDING",
-      registeredByEmail: null,
-      registeredByUid: null,
-      registeredAt: null,
-      hasRevealed: false,
-      syncedToCentral: false,
-    };
-  });
 
   // 4 Dummy Test Participants preserved separately for /test-dummy
   const dummyParticipants = DUMMY_PARTICIPANTS.map((name) => {
@@ -68,14 +46,7 @@ function loadLocalStore() {
   ];
 
   const initial = {
-    production: {
-      participants,
-      assignments: [], // Completely EMPTY - Do not generate or lock real-family assignments yet!
-      assignmentsGenerated: false,
-      assignmentsLocked: false,
-      generatedAt: null,
-      lockedAt: null,
-    },
+    production: { participants: [] },
     dummy: {
       participants: dummyParticipants,
       assignments: dummySandboxAssignments,
@@ -95,43 +66,15 @@ function saveLocalStore(store) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
 }
 
-function updateLocalParticipantSynced(docId, email) {
-  try {
-    const store = loadLocalStore();
-    const p = store.production.participants.find((x) => x.id === docId);
-    if (p) {
-      p.status = "REGISTERED";
-      p.registeredByEmail = email.toLowerCase();
-      p.syncedToCentral = true;
-      p.syncedAt = new Date().toISOString();
-      saveLocalStore(store);
-    }
-  } catch (e) {
-    console.warn("Could not mark local participant as synced:", e);
-  }
-}
-
-async function getAuthToken(user) {
-  if (auth && auth.currentUser) {
-    try {
-      const token = await auth.currentUser.getIdToken();
-      if (token) return token;
-    } catch (e) {
-      // Continue to fallback
-    }
-  }
-  const email = user?.email || auth?.currentUser?.email || "";
-  if (email) {
-    return "dev_token_" + encodeURIComponent(email);
-  }
-  return "";
-}
-
 async function apiRequest(endpoint, options = {}, user = null) {
-  const token = await getAuthToken(user);
+  const currentUser = auth?.currentUser;
+  if (!currentUser?.emailVerified || (user && currentUser.uid !== user.uid)) {
+    throw new Error("Please sign in with your verified email.");
+  }
+  const token = await currentUser.getIdToken();
   const headers = {
     "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    Authorization: `Bearer ${token}`,
     ...(options.headers || {}),
   };
 
@@ -140,19 +83,14 @@ async function apiRequest(endpoint, options = {}, user = null) {
     headers,
   });
 
-  const contentType = res.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || `Server error (${res.status})`);
-    }
-    return data;
+  if (!res.headers.get("content-type")?.includes("application/json")) {
+    throw new Error("The shared Secret Santa server is unavailable. Please try again or contact the organizer.");
   }
-
+  const data = await res.json();
   if (!res.ok) {
-    throw new Error(`Server request failed with status ${res.status}`);
+    throw new Error(data.error || `Server error (${res.status})`);
   }
-  return res.text();
+  return data;
 }
 
 export const secretSantaService = {
@@ -163,39 +101,35 @@ export const secretSantaService = {
       handleCodeInApp: true,
     };
 
-    if (isLiveFirebaseConfigured && auth) {
-      await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+    if (!auth) {
+      throw new Error("Email sign-in is unavailable. Please contact the organizer.");
     }
+    await sendSignInLinkToEmail(auth, email, actionCodeSettings);
     window.localStorage.setItem("emailForSignIn", email);
     return { success: true };
   },
 
   async completeEmailSignIn(email, href = window.location.href) {
-    if (isLiveFirebaseConfigured && auth && isSignInWithEmailLink(auth, href)) {
-      const result = await signInWithEmailLink(auth, email, href);
-      return { user: result.user };
+    if (!auth || !isSignInWithEmailLink(auth, href)) {
+      throw new Error("Open the Secret Santa sign-in link sent to your email.");
     }
-
-    const simulatedUser = {
-      uid: "uid_" + email.replace(/[^a-zA-Z0-9]/g, "_"),
-      email: email.toLowerCase(),
-      isAdmin: email.toLowerCase() === ADMIN_EMAIL.toLowerCase(),
-    };
-    return { user: simulatedUser };
+    const { user } = await signInWithEmailLink(auth, email, href);
+    return user;
   },
 
-  // 2. Safe Central Seeding (Ensures all 45 slots exist as PENDING)
-  async initializeParticipantsIfEmpty(user) {
-    try {
-      const data = await apiRequest("/api/participants", { method: "GET" }, user);
-      return { initialized: true, count: data.total || 45 };
-    } catch (e) {
-      return { initialized: false, count: 45 };
-    }
-  },
-
-  // 3. Register Participant (MongoDB Backend with Local Backup)
   async registerParticipant(name, user, environment = "production") {
+    if (environment === "production") {
+      const result = await apiRequest(
+        "/api/register",
+        { method: "POST", body: JSON.stringify({ officialName: name }) },
+        user
+      );
+      if (result?.success !== true || typeof result.participantId !== "string") {
+        throw new Error("The server could not confirm your registration. Please try again.");
+      }
+      return { ...result, isCentral: true };
+    }
+
     const officialMatch = matchOfficialParticipant(name);
     if (!officialMatch) {
       throw new Error(`"${name.trim()}" is not found in the official 45 participant list.`);
@@ -207,28 +141,6 @@ export const secretSantaService = {
     }
 
     const norm = normalizeName(officialMatch);
-    const docId = norm.replace(/\s+/g, "_");
-
-    // 1. Production Mode: Strictly require Central MongoDB API Call
-    if (environment === "production") {
-      const res = await apiRequest(
-        "/api/register",
-        {
-          method: "POST",
-          body: JSON.stringify({ officialName: officialMatch, participantId: docId }),
-        },
-        user
-      );
-
-      updateLocalParticipantSynced(docId, userEmail);
-      return {
-        success: true,
-        officialName: officialMatch,
-        participantId: docId,
-        hasRevealed: Boolean(res.hasRevealed),
-        isCentral: true,
-      };
-    }
 
     // 2. Dummy / Test Sandbox Mode ONLY (Strictly prevents silent local production writes)
     if (environment !== "dummy") {
@@ -280,24 +192,17 @@ export const secretSantaService = {
 
     // 1. Attempt Central MongoDB API Call
     if (environment === "production") {
-      try {
-        const data = await apiRequest("/api/participants", { method: "GET" }, user);
-        if (data && Array.isArray(data.participants)) {
-          return data.participants.map((p) => ({
-            id: p.id,
-            name: p.name || p.officialName,
-            status: p.status,
-            isAvailable: p.isAvailable !== undefined ? p.isAvailable : p.status === "PENDING",
-            isClaimedByYou: Boolean(p.isClaimedByYou),
-            isClaimedByOther: Boolean(p.isClaimedByOther),
-          }));
-        }
-      } catch (err) {
-        console.warn("Could not query /api/participants, using local store:", err.message);
-      }
+      const { participants } = await apiRequest("/api/participants", { method: "GET" }, user);
+      return participants.map((p) => ({
+        id: p.id,
+        name: p.name || p.officialName,
+        status: p.status,
+        isAvailable: p.isAvailable ?? (p.status === "PENDING"),
+        isClaimedByYou: Boolean(p.isClaimedByYou),
+        isClaimedByOther: Boolean(p.isClaimedByOther),
+      }));
     }
 
-    // 2. Local Store Fallback
     const store = loadLocalStore();
     const envData = store[environment];
 
@@ -320,22 +225,10 @@ export const secretSantaService = {
     const userEmail = user?.email?.toLowerCase();
     if (!userEmail) return { familyMembers: [], familyAssignments: [] };
 
-    // 1. Attempt Central MongoDB API Call
     if (environment === "production") {
-      try {
-        const data = await apiRequest("/api/my-friend?action=my-family", { method: "GET" }, user);
-        return {
-          familyMembers: data.familyMembers || [],
-          familyAssignments: data.familyAssignments || [],
-          assignmentsGenerated: Boolean(data.assignmentsGenerated),
-          assignmentsLocked: Boolean(data.assignmentsLocked),
-        };
-      } catch (err) {
-        console.warn("Could not query /api/my-friend?action=my-family, using local backup:", err.message);
-      }
+      return apiRequest("/api/my-friend?action=my-family", { method: "GET" }, user);
     }
 
-    // 2. Local Storage Fallback
     const store = loadLocalStore();
     const envData = store[environment];
     const localMine = envData.participants.filter(
@@ -356,47 +249,21 @@ export const secretSantaService = {
 
   // 6. Get My Secret Santa Friend (Reveals only the assigned friend for the authenticated participant)
   async getMySecretSantaFriend(participantId, user) {
-    try {
-      const data = await apiRequest(
-        `/api/my-friend?participantId=${encodeURIComponent(participantId)}`,
-        { method: "GET" },
-        user
-      );
-      return data;
-    } catch (e) {
-      // Local fallback
-      const store = loadLocalStore();
-      const assign = store.production.assignments.find((a) => a.giverId === participantId);
-      if (assign && store.production.assignmentsLocked) {
-        return {
-          participantId,
-          officialName: assign.giverName,
-          assignedFriend: assign.receiverName,
-          locked: true,
-          hasRevealed: true,
-        };
-      }
-      return {
-        participantId,
-        assignedFriend: null,
-        locked: false,
-        message: "Assignments have not been locked yet.",
-      };
-    }
+    return apiRequest(
+      `/api/my-friend?participantId=${encodeURIComponent(participantId)}`,
+      { method: "GET" },
+      user
+    );
   },
 
   // 7. Mark Friend Revealed (Automatic Remembrance)
   async markFriendRevealed(participantId, user, environment = "production") {
     if (environment === "production") {
-      try {
-        await apiRequest(
-          `/api/my-friend?participantId=${encodeURIComponent(participantId)}&reveal=true`,
-          { method: "POST" },
-          user
-        );
-      } catch (e) {
-        console.warn("Could not mark revealed in backend:", e.message);
-      }
+      return apiRequest(
+        `/api/my-friend?participantId=${encodeURIComponent(participantId)}&reveal=true`,
+        { method: "POST" },
+        user
+      );
     }
 
     const store = loadLocalStore();
@@ -414,22 +281,11 @@ export const secretSantaService = {
   // 8. Admin Overview
   async getAdminOverview(environment = "production", user = null) {
     if (environment === "production") {
-      try {
-        const data = await apiRequest("/api/admin?action=overview", { method: "GET" }, user);
-        return {
-          totalInDb: data.totalInDb,
-          registeredCount: data.registeredCount,
-          pendingCount: data.pendingCount,
-          uniqueVerifiedEmailsCount: data.uniqueVerifiedEmailsCount,
-          assignmentsGenerated: data.assignmentsGenerated,
-          assignmentsLocked: data.assignmentsLocked,
-          participants: data.participants,
-          assignments: data.assignments || [],
-          isCentral: true,
-        };
-      } catch (err) {
-        console.warn("API /admin overview notice, using local store:", err.message);
+      const overview = await apiRequest("/api/admin?action=overview", { method: "GET" }, user);
+      if (!Array.isArray(overview?.participants)) {
+        throw new Error("The server returned an invalid admin overview.");
       }
+      return overview;
     }
 
     const store = loadLocalStore();
@@ -447,28 +303,6 @@ export const secretSantaService = {
       participants: [...envData.participants],
       assignments: [...envData.assignments],
       isCentral: false,
-    };
-  },
-
-  // 9. Admin Real-Time Overview Subscription (Polled or Direct)
-  subscribeAdminOverview(callback, environment = "production", user = null) {
-    let active = true;
-    const fetchLatest = async () => {
-      if (!active) return;
-      try {
-        const overview = await secretSantaService.getAdminOverview(environment, user);
-        if (active) callback(overview);
-      } catch (e) {
-        // Continue
-      }
-    };
-
-    fetchLatest();
-    const interval = setInterval(fetchLatest, 4000);
-
-    return () => {
-      active = false;
-      clearInterval(interval);
     };
   },
 
@@ -557,49 +391,36 @@ export const secretSantaService = {
     saveLocalStore(store);
   },
 
-  // 13. Sync Local Registrations (For Migration to MongoDB)
-  async syncLocalRegistrationsToFirestore(user, environment = "production") {
-    if (!user || !user.email) return { syncedCount: 0, errors: [] };
+  async recoverLocalRegistrations(user) {
     const userEmail = user.email.toLowerCase();
-
-    const store = loadLocalStore();
-    const envData = store[environment];
-
-    const localClaims = envData.participants.filter(
-      (p) => p.status === "REGISTERED" && p.registeredByEmail && p.registeredByEmail.toLowerCase() === userEmail
+    const localClaims = (loadLocalStore().production?.participants || []).filter(
+      (p) => p.status === "REGISTERED" &&
+        p.registeredByEmail?.toLowerCase() === userEmail &&
+        !p.centralConfirmedAt
     );
-
-    if (localClaims.length === 0) {
-      return { syncedCount: 0, recoveredMembers: [] };
-    }
 
     const recoveredMembers = [];
     const errors = [];
 
     for (const claim of localClaims) {
       try {
-        await apiRequest(
-          "/api/register",
-          {
-            method: "POST",
-            body: JSON.stringify({ officialName: claim.officialName, participantId: claim.id }),
-          },
-          user
-        );
-        claim.syncedToCentral = true;
-        recoveredMembers.push(claim.officialName);
+        const result = await secretSantaService.registerParticipant(claim.officialName, user);
+        recoveredMembers.push(result.officialName);
       } catch (err) {
-        if (err.message.includes("already been claimed")) {
-          // Already registered in central database
-          claim.syncedToCentral = true;
-          recoveredMembers.push(claim.officialName);
-        } else {
-          errors.push(err.message);
-        }
+        errors.push(err.message);
+        continue;
+      }
+
+      const store = loadLocalStore();
+      const currentClaim = store.production?.participants.find(
+        (p) => p.id === claim.id && p.registeredByEmail?.toLowerCase() === userEmail
+      );
+      if (currentClaim) {
+        currentClaim.centralConfirmedAt = new Date().toISOString();
+        saveLocalStore(store);
       }
     }
 
-    saveLocalStore(store);
     return { syncedCount: recoveredMembers.length, recoveredMembers, errors };
   },
 

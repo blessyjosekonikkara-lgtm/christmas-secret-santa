@@ -9,15 +9,12 @@ import {
   CircularProgress,
   Dialog,
   DialogTitle,
-  DialogContent,
-  DialogActions
+  DialogContent
 } from "@mui/material";
 import MarkEmailReadIcon from "@mui/icons-material/MarkEmailRead";
 import CardGiftcardIcon from "@mui/icons-material/CardGiftcard";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import SendIcon from "@mui/icons-material/Send";
-import { useNavigate } from "react-router-dom";
-import { useAuth } from "../context/AuthContext";
 import { secretSantaService } from "../services/secretSantaService";
 
 export default function LoginPage() {
@@ -25,8 +22,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [linkSentModalOpen, setLinkSentModalOpen] = useState(false);
-  const { loginWithEmailLink } = useAuth();
-  const navigate = useNavigate();
 
   const validateEmail = (val) => {
     return String(val)
@@ -57,22 +52,6 @@ export default function LoginPage() {
       setLinkSentModalOpen(true);
     } catch (err) {
       setError(err.message || "Failed to send magic link. Please check your connection.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleFinishSignIn = async () => {
-    setLoading(true);
-    try {
-      const user = await loginWithEmailLink(email.trim().toLowerCase());
-      if (user.isAdmin) {
-        navigate("/admin");
-      } else {
-        navigate("/verify-name");
-      }
-    } catch (err) {
-      setError(err.message || "Sign in failed.");
     } finally {
       setLoading(false);
     }
@@ -253,21 +232,6 @@ export default function LoginPage() {
             Please check your email inbox and click the link to verify your account and enter the Secret Santa exchange!
           </Typography>
         </DialogContent>
-        <DialogActions sx={{ justifyContent: "center", pb: 2 }}>
-          <Button
-            variant="contained"
-            onClick={handleFinishSignIn}
-            sx={{
-              background: "linear-gradient(135deg, #FDE68A, #D4AF37)",
-              color: "#452C06",
-              fontWeight: 800,
-              borderRadius: 20,
-              px: 3,
-            }}
-          >
-            Enter Now
-          </Button>
-        </DialogActions>
       </Dialog>
     </Box>
   );

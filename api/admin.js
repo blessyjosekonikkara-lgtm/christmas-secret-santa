@@ -1,4 +1,4 @@
-const { getDatabase, verifyAuthToken, OFFICIAL_PARTICIPANTS, normalizeName, matchOfficialParticipant } = require("./db");
+const { getDatabase, verifyAuthToken, OFFICIAL_PARTICIPANTS, normalizeName } = require("./_db");
 
 function generateDerangement(items) {
   if (!items || items.length < 2) {
@@ -46,14 +46,13 @@ function generateDerangement(items) {
 
 module.exports = async function handler(req, res) {
   res.setHeader("Content-Type", "application/json");
-
-  // 1. Strict Administrator Authorization Check
-  const auth = verifyAuthToken(req);
-  if (!auth.authenticated || !auth.isAdmin) {
-    return res.status(403).json({ error: "Access denied. Restricted to authorized administrator." });
-  }
+  res.setHeader("Cache-Control", "private, no-store");
 
   try {
+    const auth = await verifyAuthToken(req);
+    if (!auth.isAdmin) {
+      return res.status(403).json({ error: "Access denied. Restricted to authorized administrator." });
+    }
     const { db } = await getDatabase();
     const action = req.query.action || req.body?.action || "overview";
 

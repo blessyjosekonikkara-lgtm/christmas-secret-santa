@@ -1,16 +1,22 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useCallback, useContext, useState, useEffect } from "react";
 import { secretSantaService } from "../services/secretSantaService";
 import { ADMIN_EMAIL } from "../config/participants";
-import { auth, onAuthStateChanged, signOut as firebaseSignOut, isLiveFirebaseConfigured } from "../config/firebase";
+import { auth, onAuthStateChanged, signOut as firebaseSignOut } from "../config/firebase";
 
 const AuthContext = createContext(null);
 const SELECTED_MEMBER_KEY = "SECRET_SANTA_SELECTED_MEMBER_ID";
+
+function sessionUser(firebaseUser) {
+  if (!firebaseUser?.emailVerified || !firebaseUser.email) return null;
+  const email = firebaseUser.email.toLowerCase();
+  return { uid: firebaseUser.uid, email, isAdmin: email === ADMIN_EMAIL };
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [familyMembers, setFamilyMembers] = useState([]);
   const [selectedMember, setSelectedMemberState] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(auth));
 
   // Set selected member and persist to localStorage
   const setSelectedMember = (member) => {
@@ -22,82 +28,48 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Restore session from localStorage or Firebase
-  useEffect(() => {
-    if (isLiveFirebaseConfigured && auth) {
-      const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-        if (firebaseUser && firebaseUser.email) {
-          const authUser = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email.toLowerCase(),
-            isAdmin: firebaseUser.email.toLowerCase() === ADMIN_EMAIL.toLowerCase(),
-          };
-          setUser(authUser);
-          await loadFamily(authUser);
-        } else {
-          setUser(null);
-          setFamilyMembers([]);
-          setSelectedMemberState(null);
-        }
-        setLoading(false);
-      });
-      return () => unsubscribe();
-    } else {
-      // Local simulation session restoration
-      const savedUserStr = localStorage.getItem("SECRET_SANTA_AUTH_USER");
-      if (savedUserStr) {
-        try {
-          const savedUser = JSON.parse(savedUserStr);
-          setUser(savedUser);
-          loadFamily(savedUser);
-        } catch (e) {
-          localStorage.removeItem("SECRET_SANTA_AUTH_USER");
-        }
-      }
-      setLoading(false);
-    }
+  const loadFamily = useCallback(async (currentUser) => {
+    const { familyMembers: members } = await secretSantaService.getMyFamilyAssignments(currentUser);
+    if (auth?.currentUser?.uid !== currentUser.uid) return [];
+
+    const savedMemberId = localStorage.getItem(SELECTED_MEMBER_KEY);
+    const member = members.find((m) => m.id === savedMemberId) || members[0] || null;
+    setFamilyMembers(members);
+    setSelectedMemberState(member);
+    if (member) localStorage.setItem(SELECTED_MEMBER_KEY, member.id);
+    return members;
   }, []);
 
-  const loadFamily = async (currentUser) => {
-    if (!currentUser) return;
-    try {
-      const data = await secretSantaService.getMyFamilyAssignments(currentUser);
-      const members = data.familyMembers || [];
-      setFamilyMembers(members);
-
-      if (members.length > 0) {
-        const savedMemberId = localStorage.getItem(SELECTED_MEMBER_KEY);
-        const matchSaved = savedMemberId ? members.find((m) => m.id === savedMemberId) : null;
-        if (matchSaved) {
-          setSelectedMemberState(matchSaved);
-        } else {
-          // Default to the first member and save
-          setSelectedMemberState(members[0]);
-          localStorage.setItem(SELECTED_MEMBER_KEY, members[0].id);
-        }
-      } else {
+  useEffect(() => {
+    if (!auth) return;
+    return onAuthStateChanged(auth, async (firebaseUser) => {
+      const nextUser = sessionUser(firebaseUser);
+      setUser(nextUser);
+      if (!nextUser) {
+        setFamilyMembers([]);
         setSelectedMemberState(null);
+      } else {
+        await loadFamily(nextUser).catch((err) => console.error("Failed to load family members:", err));
       }
-    } catch (err) {
-      console.error("Failed to load family members:", err);
-    }
-  };
+      setLoading(false);
+    });
+  }, [loadFamily]);
 
-  const loginWithEmailLink = async (email, href) => {
+  const loginWithEmailLink = useCallback(async (email, href) => {
     setLoading(true);
     try {
-      const { user: authedUser } = await secretSantaService.completeEmailSignIn(email, href);
+      const authedUser = sessionUser(await secretSantaService.completeEmailSignIn(email, href));
+      if (!authedUser) throw new Error("A verified email is required.");
       setUser(authedUser);
-      localStorage.setItem("SECRET_SANTA_AUTH_USER", JSON.stringify(authedUser));
-      await loadFamily(authedUser);
+      localStorage.removeItem("emailForSignIn");
       return authedUser;
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const logout = async () => {
-    if (isLiveFirebaseConfigured && auth) {
+    if (auth) {
       await firebaseSignOut(auth);
     }
     setUser(null);
@@ -108,11 +80,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem(SELECTED_MEMBER_KEY);
   };
 
-  const refreshFamily = async () => {
-    if (user) {
-      await loadFamily(user);
-    }
-  };
+  const refreshFamily = useCallback(() => user ? loadFamily(user) : Promise.resolve([]), [user, loadFamily]);
 
   return (
     <AuthContext.Provider

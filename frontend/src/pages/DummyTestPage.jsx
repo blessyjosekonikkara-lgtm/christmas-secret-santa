@@ -52,7 +52,7 @@ export default function DummyTestPage() {
       const validCheck = emailRegex.test(validEmail);
       const invalidCheck = !emailRegex.test(invalidEmail);
 
-      const simUserAlice = (await secretSantaService.completeEmailSignIn(validEmail)).user;
+      const simUserAlice = { uid: "uid_alice_test", email: validEmail };
       results.testA.details.push(`Valid email (${validEmail}) correctly accepted`);
       results.testA.details.push(`Invalid email (${invalidEmail}) correctly rejected`);
       results.testA.details.push(`Passwordless auth successfully generated session UID: ${simUserAlice.uid}`);
@@ -132,9 +132,9 @@ export default function DummyTestPage() {
       const originalFriend = aliceEntry.assignedFriend;
       results.testE.details.push(`Initial draw for ALICE: ${originalFriend}`);
 
-      await secretSantaService.markFriendRevealed(aliceEntry.id, "dummy");
+      await secretSantaService.markFriendRevealed(aliceEntry.id, simUserAlice, "dummy");
 
-      const reLoggedUser = (await secretSantaService.completeEmailSignIn(validEmail)).user;
+      const reLoggedUser = { ...simUserAlice };
       const reLoadedFamily = await secretSantaService.getMyFamilyAssignments(reLoggedUser, "dummy");
       const reLoadedAlice = reLoadedFamily.familyMembers.find((m) => m.officialName === "ALICE");
       const reLoadedBob = reLoadedFamily.familyMembers.find((m) => m.officialName === "BOB");

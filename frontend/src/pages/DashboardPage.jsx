@@ -29,7 +29,7 @@ export default function DashboardPage() {
     try {
       // Auto-recover/sync in background silently
       try {
-        const syncRes = await secretSantaService.syncLocalRegistrationsToFirestore(user);
+        const syncRes = await secretSantaService.recoverLocalRegistrations(user);
         if (syncRes.syncedCount > 0) {
           await refreshFamily();
         }

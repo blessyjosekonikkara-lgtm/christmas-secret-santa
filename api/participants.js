@@ -1,15 +1,15 @@
-const { getDatabase, verifyAuthToken } = require("./db");
+const { getDatabase, verifyAuthToken } = require("./_db");
 
 module.exports = async function handler(req, res) {
-  // Set CORS and JSON headers
   res.setHeader("Content-Type", "application/json");
+  res.setHeader("Cache-Control", "private, no-store");
 
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed. Use GET." });
   }
 
   try {
-    const auth = verifyAuthToken(req);
+    const auth = await verifyAuthToken(req);
     const { db } = await getDatabase();
 
     const participants = await db
@@ -60,6 +60,6 @@ module.exports = async function handler(req, res) {
     });
   } catch (err) {
     console.error("API /participants error:", err);
-    return res.status(500).json({ error: "Database service error: " + err.message });
+    return res.status(500).json({ error: "The shared family roster is unavailable. Please try again." });
   }
 };

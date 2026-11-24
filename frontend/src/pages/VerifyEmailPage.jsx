@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { 
   Box, 
   Paper, 
@@ -19,10 +19,13 @@ export default function VerifyEmailPage() {
   const [emailInput, setEmailInput] = useState("");
   const { loginWithEmailLink } = useAuth();
   const navigate = useNavigate();
+  const started = useRef(false);
 
   useEffect(() => {
+    if (started.current) return;
+    started.current = true;
     const handleVerification = async () => {
-      let email = window.localStorage.getItem("emailForSignIn");
+      const email = window.localStorage.getItem("emailForSignIn");
 
       if (!email) {
         // Opened on a different device or incognito window

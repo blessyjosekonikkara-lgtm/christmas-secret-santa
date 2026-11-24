@@ -1,17 +1,15 @@
-const { getDatabase, verifyAuthToken } = require("./db");
+const { getDatabase, verifyAuthToken } = require("./_db");
 
 module.exports = async function handler(req, res) {
   res.setHeader("Content-Type", "application/json");
-
-  // 1. Authenticate Request
-  const auth = verifyAuthToken(req);
-  if (!auth.authenticated || !auth.email) {
-    return res.status(401).json({ error: "Authentication required to view Secret Santa friend." });
-  }
-
-  const userEmail = auth.email.toLowerCase();
+  res.setHeader("Cache-Control", "private, no-store");
 
   try {
+    const auth = await verifyAuthToken(req);
+    if (!auth.authenticated) {
+      return res.status(401).json({ error: "Authentication required to view Secret Santa friend." });
+    }
+    const userEmail = auth.email;
     const { db } = await getDatabase();
 
     // Action A: Fetch all family members registered under this email
@@ -105,6 +103,6 @@ module.exports = async function handler(req, res) {
     });
   } catch (err) {
     console.error("API /my-friend error:", err);
-    return res.status(500).json({ error: "Failed to retrieve Secret Santa friend: " + err.message });
+    return res.status(500).json({ error: "Could not load your family registration or assignment. Please try again." });
   }
 };

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { 
   Box, 
   Paper, 
@@ -44,6 +44,7 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [overviewError, setOverviewError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
   // Filters & Search
@@ -67,46 +68,44 @@ export default function AdminPage() {
 
   const isAdmin = user && user.email && user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
 
-  const loadData = async () => {
-    setLoading(true);
-    setError("");
+  const loadData = useCallback(async () => {
     try {
-      // Safe check to ensure the 45 participants are seeded in MongoDB if empty
-      await secretSantaService.initializeParticipantsIfEmpty(user);
       const overview = await secretSantaService.getAdminOverview("production", user);
       setData(overview);
+      setOverviewError("");
     } catch (err) {
-      setError(err.message || "Failed to load admin data.");
+      setOverviewError(err.message || "Failed to load shared registration data.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [user]);
 
   useEffect(() => {
-    if (isAdmin) {
-      loadData();
-      // Attach real-time listener for live registration updates
-      const unsubscribe = secretSantaService.subscribeAdminOverview((liveOverview) => {
-        setData(liveOverview);
-        setLoading(false);
-      }, "production", user);
-
-      return () => {
-        if (typeof unsubscribe === "function") unsubscribe();
-      };
-    }
-  }, [isAdmin]);
+    if (!isAdmin) return;
+    let active = true;
+    const poll = async () => {
+      await loadData();
+      if (active) timer = setTimeout(poll, 4000);
+    };
+    let timer = setTimeout(poll, 0);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [isAdmin, loadData]);
 
   const handleSyncLocalRegistrations = async () => {
     setSyncingLocal(true);
     setError("");
+    setSuccessMessage("");
     try {
-      const res = await secretSantaService.syncLocalRegistrationsToFirestore(user, "production");
+      const res = await secretSantaService.recoverLocalRegistrations(user);
       if (res.syncedCount > 0) {
-        setSuccessMessage(`Successfully recovered and synced ${res.syncedCount} member(s): ${res.recoveredMembers.join(", ")}`);
-      } else {
-        setSuccessMessage("All local registrations on this device are already synced to the Central Cloud.");
+        setSuccessMessage(`Confirmed ${res.syncedCount} registration(s) for ${res.recoveredMembers.join(", ")}.`);
+      } else if (res.errors.length === 0) {
+        setSuccessMessage("There are no outstanding registrations for this account in this browser.");
       }
+      if (res.errors.length) setError(res.errors.join(" "));
       await loadData();
     } catch (e) {
       setError(e.message || "Could not sync local registrations.");
@@ -251,15 +250,15 @@ export default function AdminPage() {
             <Typography variant="h4" sx={{ color: "#78350F", fontWeight: 900, letterSpacing: 1 }}>
               🎅 Admin Secret Santa Console
             </Typography>
-            <Chip 
-              label={data?.isCentral ? "Central Cloud Live ☁️" : "Local Backup"} 
+            <Chip
+              label={overviewError ? "Cloud unavailable" : loading ? "Connecting…" : "Cloud connected"}
               size="small" 
               sx={{ 
-                bgcolor: data?.isCentral ? "rgba(16, 185, 129, 0.15)" : "rgba(245, 158, 11, 0.15)",
-                color: data?.isCentral ? "#065F46" : "#92400E",
+                bgcolor: overviewError ? "rgba(245, 158, 11, 0.15)" : "rgba(16, 185, 129, 0.15)",
+                color: overviewError ? "#92400E" : "#065F46",
                 fontWeight: 800,
                 border: "1px solid",
-                borderColor: data?.isCentral ? "#10B981" : "#F59E0B"
+                borderColor: overviewError ? "#F59E0B" : "#10B981"
               }} 
             />
           </Box>
@@ -309,6 +308,11 @@ export default function AdminPage() {
       </Box>
 
       {/* Alerts */}
+      {overviewError && (
+        <Alert severity="error" sx={{ mb: 3, borderRadius: 2 }}>
+          {overviewError} {data && "Showing the last roster loaded from the server."}
+        </Alert>
+      )}
       {error && (
         <Alert severity="error" sx={{ mb: 3, borderRadius: 2 }} onClose={() => setError("")}>
           {error}
@@ -327,7 +331,7 @@ export default function AdminPage() {
           <Card sx={{ background: "rgba(255, 255, 255, 0.9)", border: "1.5px solid #D4AF37", textAlign: "center", borderRadius: 3 }}>
             <CardContent>
               <Typography variant="h3" sx={{ color: "#78350F", fontWeight: 800 }}>
-                {data?.totalInDb || 0}
+                {data?.totalInDb ?? "—"}
               </Typography>
               <Typography variant="caption" sx={{ color: "#78716C", fontWeight: 700 }}>
                 TOTAL PARTICIPANTS
@@ -340,7 +344,7 @@ export default function AdminPage() {
           <Card sx={{ background: "rgba(236, 253, 245, 0.9)", border: "1.5px solid #10B981", textAlign: "center", borderRadius: 3 }}>
             <CardContent>
               <Typography variant="h3" sx={{ color: "#065F46", fontWeight: 800 }}>
-                {data?.registeredCount || 0}
+                {data?.registeredCount ?? "—"}
               </Typography>
               <Typography variant="caption" sx={{ color: "#065F46", fontWeight: 700 }}>
                 REGISTERED MEMBERS
@@ -353,7 +357,7 @@ export default function AdminPage() {
           <Card sx={{ background: "rgba(254, 243, 199, 0.9)", border: "1.5px solid #F59E0B", textAlign: "center", borderRadius: 3 }}>
             <CardContent>
               <Typography variant="h3" sx={{ color: "#92400E", fontWeight: 800 }}>
-                {data?.pendingCount || 0}
+                {data?.pendingCount ?? "—"}
               </Typography>
               <Typography variant="caption" sx={{ color: "#92400E", fontWeight: 700 }}>
                 PENDING MEMBERS
@@ -366,7 +370,7 @@ export default function AdminPage() {
           <Card sx={{ background: "rgba(239, 246, 255, 0.9)", border: "1.5px solid #3B82F6", textAlign: "center", borderRadius: 3 }}>
             <CardContent>
               <Typography variant="h3" sx={{ color: "#1E40AF", fontWeight: 800 }}>
-                {data?.uniqueVerifiedEmailsCount || 0}
+                {data?.uniqueVerifiedEmailsCount ?? "—"}
               </Typography>
               <Typography variant="caption" sx={{ color: "#1E40AF", fontWeight: 700 }}>
                 VERIFIED ACCOUNTS
@@ -529,9 +533,9 @@ export default function AdminPage() {
           textColor="secondary"
           indicatorColor="secondary"
         >
-          <Tab label={`All (${data?.totalInDb || 0})`} value="ALL" sx={{ fontWeight: 700, color: "#78350F" }} />
-          <Tab label={`Registered (${data?.registeredCount || 0})`} value="REGISTERED" sx={{ fontWeight: 700, color: "#78350F" }} />
-          <Tab label={`Pending (${data?.pendingCount || 0})`} value="PENDING" sx={{ fontWeight: 700, color: "#78350F" }} />
+          <Tab label={`All (${data?.totalInDb ?? "—"})`} value="ALL" sx={{ fontWeight: 700, color: "#78350F" }} />
+          <Tab label={`Registered (${data?.registeredCount ?? "—"})`} value="REGISTERED" sx={{ fontWeight: 700, color: "#78350F" }} />
+          <Tab label={`Pending (${data?.pendingCount ?? "—"})`} value="PENDING" sx={{ fontWeight: 700, color: "#78350F" }} />
         </Tabs>
 
         <TableContainer sx={{ maxHeight: 600 }}>

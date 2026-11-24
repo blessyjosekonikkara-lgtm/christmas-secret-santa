@@ -25,29 +25,35 @@ export default function NameVerificationPage() {
   const [nameInput, setNameInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [roster, setRoster] = useState([]);
+  const [rosterError, setRosterError] = useState("");
+  const [roster, setRoster] = useState(null);
 
   const { user, familyMembers, refreshFamily, setSelectedMember } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
+    if (!user) return;
+    let active = true;
     const loadRoster = async () => {
       try {
-        if (user?.email) {
-          try {
-            await secretSantaService.syncLocalRegistrationsToFirestore(user);
-          } catch (e) {
-            console.warn("Auto-sync notice:", e);
-          }
+        const recovery = await secretSantaService.recoverLocalRegistrations(user);
+        if (active && recovery.errors.length) {
+          setError(recovery.errors.join(" "));
         }
+        if (active && recovery.syncedCount) await refreshFamily();
+      } catch (err) {
+        console.warn("Could not recover browser registrations:", err);
+      }
+      try {
         const list = await secretSantaService.getAvailableRoster(user);
-        setRoster(list);
-      } catch (e) {
-        console.warn("Could not fetch roster:", e);
+        if (active) setRoster(list);
+      } catch (err) {
+        if (active) setRosterError(err.message || "Could not load the shared family roster.");
       }
     };
     loadRoster();
-  }, [user, familyMembers]);
+    return () => { active = false; };
+  }, [user, refreshFamily]);
 
   const handleGoToDashboard = async (e) => {
     if (e) e.preventDefault();
@@ -60,6 +66,8 @@ export default function NameVerificationPage() {
       navigate("/dashboard");
       return;
     }
+
+    if (!roster) return;
 
     if (!trimmed) {
       setError("Please select your official name from the dropdown.");
@@ -75,11 +83,10 @@ export default function NameVerificationPage() {
     setLoading(true);
     try {
       const res = await secretSantaService.registerParticipant(officialMatch, user);
-      await refreshFamily();
-
-      // Retrieve updated member entry
-      const updatedFamily = await secretSantaService.getMyFamilyAssignments(user);
-      const matched = updatedFamily?.familyMembers?.find((m) => m.id === res.participantId);
+      const members = await refreshFamily().catch(() => {
+        throw new Error("Your registration was saved. Please try again to open your dashboard.");
+      });
+      const matched = members.find((m) => m.id === res.participantId);
       if (matched) {
         setSelectedMember(matched);
       }
@@ -174,6 +181,9 @@ export default function NameVerificationPage() {
             {error}
           </Alert>
         )}
+        {rosterError && (
+          <Alert severity="error" sx={{ mb: 2 }}>{rosterError}</Alert>
+        )}
 
         <form onSubmit={handleGoToDashboard}>
           <Box sx={{ textAlign: "left", mb: 1.5 }}>
@@ -193,7 +203,7 @@ export default function NameVerificationPage() {
               value={nameInput}
               label="Select Official Family Name"
               onChange={(e) => setNameInput(e.target.value)}
-              disabled={loading}
+              disabled={loading || !roster}
               MenuProps={{
                 PaperProps: {
                   sx: {
@@ -219,14 +229,14 @@ export default function NameVerificationPage() {
                 <em>-- Select from 45 Official Family Members --</em>
               </MenuItem>
               {OFFICIAL_PARTICIPANTS.map((officialName) => {
-                const item = roster.find((r) => r.name.toLowerCase() === officialName.toLowerCase());
+                const item = roster?.find((r) => r.name.toLowerCase() === officialName.toLowerCase());
                 const isClaimedByYou = item?.isClaimedByYou;
                 const isClaimedByOther = item?.isClaimedByOther;
                 return (
                   <MenuItem 
                     key={officialName} 
                     value={officialName}
-                    disabled={isClaimedByOther}
+                    disabled={!item || isClaimedByOther}
                     sx={{ py: 1.2 }}
                   >
                     <Box sx={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
@@ -258,7 +268,7 @@ export default function NameVerificationPage() {
             type="submit"
             variant="contained"
             size="large"
-            disabled={loading || (!nameInput && familyMembers.length === 0)}
+            disabled={loading || (nameInput ? !roster : familyMembers.length === 0)}
             endIcon={loading ? <CircularProgress size={20} color="inherit" /> : <ArrowForwardIcon />}
             sx={{
               py: 1.6,
