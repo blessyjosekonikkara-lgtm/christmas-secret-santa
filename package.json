@@ -1,13 +1,16 @@
 {
   "name": "secret-santa",
   "version": "1.0.0",
-  "description": "",
+  "description": "Christmas Secret Santa Platform",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node scripts/testSuite.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "type": "commonjs",
+  "dependencies": {
+    "mongodb": "^6.5.0"
+  }
 }

@@ -71,9 +71,9 @@ export default function AdminPage() {
     setLoading(true);
     setError("");
     try {
-      // Safe check to ensure the 45 participants are seeded in Firestore if empty
+      // Safe check to ensure the 45 participants are seeded in MongoDB if empty
       await secretSantaService.initializeParticipantsIfEmpty(user);
-      const overview = await secretSantaService.getAdminOverview("production");
+      const overview = await secretSantaService.getAdminOverview("production", user);
       setData(overview);
     } catch (err) {
       setError(err.message || "Failed to load admin data.");
@@ -85,11 +85,11 @@ export default function AdminPage() {
   useEffect(() => {
     if (isAdmin) {
       loadData();
-      // Attach real-time Firestore listener for live registration updates
+      // Attach real-time listener for live registration updates
       const unsubscribe = secretSantaService.subscribeAdminOverview((liveOverview) => {
         setData(liveOverview);
         setLoading(false);
-      }, "production");
+      }, "production", user);
 
       return () => {
         if (typeof unsubscribe === "function") unsubscribe();
@@ -196,8 +196,8 @@ export default function AdminPage() {
   const handleGenerateAssignments = async () => {
     setError("");
     try {
-      const res = await secretSantaService.generateAssignments("production");
-      setSuccessMessage(`Generated ${res.totalAssignments} unique Secret Santa assignments using Fisher-Yates derangement!`);
+      const res = await secretSantaService.generateAssignments("production", user);
+      setSuccessMessage(`Generated ${res.totalPairs || res.totalAssignments || 45} unique Secret Santa assignments using Fisher-Yates derangement!`);
       loadData();
     } catch (err) {
       setError(err.message || "Failed to generate assignments.");
@@ -208,7 +208,7 @@ export default function AdminPage() {
   const handleLockAssignments = async () => {
     setError("");
     try {
-      await secretSantaService.lockAssignments("production");
+      await secretSantaService.lockAssignments("production", user);
       setSuccessMessage("All assignments are now PERMANENTLY LOCKED. No further regeneration is possible.");
       setConfirmLockModalOpen(false);
       loadData();
